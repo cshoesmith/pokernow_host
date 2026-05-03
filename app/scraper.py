@@ -56,6 +56,10 @@ class _SessionScraper(threading.Thread):
     def stop(self) -> None:
         self._stop.set()
 
+    # Exceptions that indicate the Chrome session is dead and needs full reinit.
+    _FATAL_EXC = ("InvalidSessionIdException", "WebDriverException",
+                  "NoSuchWindowException", "SessionNotCreatedException")
+
     def run(self) -> None:  # noqa: C901 - pragmatic
         try:
             self._init_driver()
@@ -74,6 +78,20 @@ class _SessionScraper(threading.Thread):
                 except Exception as exc:
                     self.status.last_error = f"{exc.__class__.__name__}: {exc}"
                     log.warning("poll error: %s\n%s", exc, traceback.format_exc())
+                    # Dead browser session — tear down and reinitialise Chrome.
+                    if type(exc).__name__ in self._FATAL_EXC:
+                        log.warning("fatal driver error — reinitialising Chrome for session %s", self.session_id)
+                        self._teardown_driver()
+                        self._stop.wait(5)
+                        if self._stop.is_set():
+                            break
+                        try:
+                            self._init_driver()
+                            self.status.last_error = None
+                        except Exception as init_exc:
+                            self.status.last_error = f"reinit failed: {init_exc}"
+                            log.exception("reinit failed for session %s", self.session_id)
+                            break  # give up; watchdog will restart the thread
                 self._stop.wait(self.POLL_SECONDS)
         finally:
             self.status.running = False
