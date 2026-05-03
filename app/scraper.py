@@ -162,8 +162,19 @@ class _SessionScraper(threading.Thread):
             if auto:
                 prev = self._last_stacks.get(name)
                 if prev is None:
-                    # First time we see this player — record buy-in.
-                    if stack > 0:
+                    # First sight of this player this run.
+                    # Check DB: if they already have a ledger entry this session
+                    # we're resuming after a restart — don't double-record a buyin.
+                    existing = db.query_one(
+                        "SELECT 1 FROM ledger_entries "
+                        "WHERE session_id=? AND player_id=("
+                        "  SELECT id FROM players WHERE name=? COLLATE NOCASE LIMIT 1"
+                        ") LIMIT 1",
+                        (self.session_id, name),
+                    )
+                    if existing:
+                        log.info("scraper resume: skipping duplicate buyin for %s", name)
+                    elif stack > 0:
                         db.auto_record_ledger(self.session_id, name, "buyin", stack,
                                               note="auto-buyin")
                         log.info("auto buyin: %s %.0f", name, stack)
