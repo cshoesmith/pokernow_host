@@ -66,6 +66,15 @@
     .rank-list li.gold   { box-shadow: inset 3px 0 0 #d4a017; }
     .rank-list li.silver { box-shadow: inset 3px 0 0 #a3aab2; }
     .rank-list li.bronze { box-shadow: inset 3px 0 0 #a36a3a; }
+
+    /* playing cards */
+    .cards { display:inline-flex; gap:2px; flex-wrap:nowrap; vertical-align:middle; }
+    .card  { display:inline-flex; flex-direction:column; align-items:center;
+             justify-content:center; width:26px; height:36px; background:#eef2f7;
+             border-radius:4px; font-size:10px; font-weight:800; line-height:1.1;
+             color:#111; box-shadow:0 1px 3px rgba(0,0,0,.55); user-select:none; }
+    .card .csym { font-size:12px; line-height:1; }
+    .card.red  { color:#cc1111; }
   </style>
 </head>
 <body>

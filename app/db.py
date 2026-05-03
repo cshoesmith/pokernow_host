@@ -6,6 +6,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from itertools import groupby
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -63,7 +64,9 @@ CREATE TABLE IF NOT EXISTS hand_winners (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     hand_id       INTEGER NOT NULL REFERENCES hands(id) ON DELETE CASCADE,
     player_name   TEXT NOT NULL,
-    amount_won    REAL
+    amount_won    REAL,
+    winner_cards  TEXT,
+    winner_hand_desc TEXT
 );
 
 CREATE TABLE IF NOT EXISTS stack_snapshots (
@@ -97,6 +100,11 @@ def init_db() -> None:
         existing = {row[1] for row in cx.execute("PRAGMA table_info(sessions)")}
         if "auto_ledger" not in existing:
             cx.execute("ALTER TABLE sessions ADD COLUMN auto_ledger INTEGER NOT NULL DEFAULT 0")
+        hw_cols = {row[1] for row in cx.execute("PRAGMA table_info(hand_winners)")}
+        if "winner_cards" not in hw_cols:
+            cx.execute("ALTER TABLE hand_winners ADD COLUMN winner_cards TEXT")
+        if "winner_hand_desc" not in hw_cols:
+            cx.execute("ALTER TABLE hand_winners ADD COLUMN winner_hand_desc TEXT")
 
 
 @contextmanager
@@ -470,31 +478,39 @@ def session_pl_timeline(session_id: int) -> list[dict[str, Any]]:
         for s in snaps:
             if s["seat_name"] == seat:
                 events.append((s["ts"], "S", float(s["stack"] or 0)))
-        # Sort by time; at equal timestamps put stack snapshots before ledger
-        # events so the current stack is set before P&L is computed.
+        # Sort by time; within a timestamp process snapshots before ledger events.
         events.sort(key=lambda x: (x[0], 0 if x[1] == "S" else 1))
         points: list[dict[str, Any]] = []
         has_ledger_entry = False
-        for ts, kind, val in events:
+        # Group by timestamp so a rebuy snapshot + ledger entry at the same
+        # second are collapsed into one point (avoids false P&L spike).
+        for ts, grp in groupby(events, key=lambda x: x[0]):
             marker = None
-            if kind.startswith("L:"):
-                has_ledger_entry = True
-                k = kind.split(":", 1)[1]
-                if k in ("buyin", "rebuy"):
-                    bought += val
-                    marker = "buyin"
-                elif k == "cashout":
-                    cashed += val
-                    marker = "cashout"
-                elif k == "adjust":
-                    adj += val
-                    marker = "adjust"
-            elif kind == "S":
-                stack = val
-                if not has_ledger_entry:
-                    continue  # update stack but skip point until first buyin recorded
+            marker_amount = None
+            has_snap = False
+            for _, kind, val in grp:
+                if kind == "S":
+                    stack = val
+                    has_snap = True
+                elif kind.startswith("L:"):
+                    has_ledger_entry = True
+                    k = kind.split(":", 1)[1]
+                    if k in ("buyin", "rebuy"):
+                        bought += val
+                        marker = "buyin"
+                        marker_amount = val
+                    elif k == "cashout":
+                        cashed += val
+                        marker = "cashout"
+                        marker_amount = val
+                    elif k == "adjust":
+                        adj += val
+                        marker = "adjust"
+                        marker_amount = val
+            if not has_ledger_entry and has_snap:
+                continue  # skip pre-buyin snapshots
             pl = stack + cashed - bought + adj
-            points.append({"ts": ts, "pl": pl, "marker": marker, "amount": val if marker else None})
+            points.append({"ts": ts, "pl": pl, "marker": marker, "amount": marker_amount})
         if points:
             out.append({"name": p["name"], "points": points})
     return out

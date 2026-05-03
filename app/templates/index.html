@@ -28,7 +28,13 @@
         <td><span class="pill {{ s.status }}">{{ s.status }}</span></td>
         <td class="muted">{{ s.started_at | localtime }}</td>
         <td class="muted">{% if s.ended_at %}{{ s.ended_at | localtime }}{% else %}—{% endif %}</td>
-        <td><a href="/sessions/{{ s.id }}">open →</a></td>
+        <td style="display:flex; gap:8px; align-items:center;">
+          <a href="/sessions/{{ s.id }}">open →</a>
+          <form method="post" action="/sessions/{{ s.id }}/delete"
+                onsubmit="return confirm('Delete \'{{ s.name }}\' and all its data? This cannot be undone.')">
+            <button class="danger" style="padding:2px 8px; font-size:11px;">Delete</button>
+          </form>
+        </td>
       </tr>
     {% endfor %}
     </tbody>

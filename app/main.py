@@ -32,9 +32,44 @@ def _localtime_filter(value):
 templates.env.filters["localtime"] = _localtime_filter
 
 
+def _cards_filter(board: str) -> list[dict]:
+    """Parse 'Rank of Suit ...' board string into a list of card dicts for rendering."""
+    if not board:
+        return []
+    rank_abbr = {
+        'ace': 'A', 'king': 'K', 'queen': 'Q', 'jack': 'J',
+        '2': '2', '3': '3', '4': '4', '5': '5', '6': '6',
+        '7': '7', '8': '8', '9': '9', '10': '10',
+    }
+    suit_sym = {'hearts': '\u2665', 'diamonds': '\u2666', 'clubs': '\u2663', 'spades': '\u2660'}
+    suit_red = {'hearts', 'diamonds'}
+    cards = []
+    tokens = board.strip().lower().split()
+    i = 0
+    while i + 2 <= len(tokens) - 1:
+        if tokens[i + 1] == 'of':
+            rank = rank_abbr.get(tokens[i], tokens[i].upper())
+            suit_raw = tokens[i + 2]
+            cards.append({'rank': rank, 'suit': suit_sym.get(suit_raw, '?'), 'red': suit_raw in suit_red})
+            i += 3
+        else:
+            i += 1
+    return cards
+
+
+templates.env.filters["cards"] = _cards_filter
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.init_db()
+    # Auto-resume scrapers for open sessions that have a PokerNow URL.
+    open_sessions = db.query(
+        "SELECT id, pokernow_url FROM sessions WHERE status='open' AND pokernow_url IS NOT NULL"
+    )
+    for s in open_sessions:
+        logging.info("auto-resuming scraper for session %s (%s)", s["id"], s["pokernow_url"])
+        scraper_manager.start(s["id"], s["pokernow_url"])
     yield
     scraper_manager.stop_all()
 
@@ -199,6 +234,13 @@ def reopen_session(session_id: int):
         (session_id,),
     )
     return RedirectResponse(f"/sessions/{session_id}", status_code=303)
+
+
+@app.post("/sessions/{session_id}/delete")
+def delete_session(session_id: int):
+    scraper_manager.stop(session_id)
+    db.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+    return RedirectResponse("/", status_code=303)
 
 
 @app.post("/sessions/{session_id}/set_auto_ledger")

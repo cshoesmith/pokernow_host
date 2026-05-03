@@ -201,6 +201,18 @@ class _SessionScraper(threading.Thread):
         # the winners banner shows.
         pot = self._peak_pot if self._peak_pot > 0 else _coerce_number(getattr(gs, "pot_size", None))
 
+        # Build a name→cards/hand-desc map from current player state (visible at showdown).
+        player_cards: dict[str, str] = {}
+        player_hand_desc: dict[str, str] = {}
+        for pl in getattr(gs, "players", []) or []:
+            name = (getattr(pl, "name", "") or "").strip()
+            cards = getattr(pl, "cards", None) or []
+            if name and cards:
+                player_cards[name] = " | ".join(str(c) for c in cards)
+            hand_msg = (getattr(pl, "hand_message", "") or "").strip()
+            if name and hand_msg:
+                player_hand_desc[name] = hand_msg
+
         with db.connect() as cx:
             row = cx.execute(
                 "SELECT COALESCE(MAX(hand_number), 0) AS m FROM hands WHERE session_id = ?",
@@ -214,13 +226,21 @@ class _SessionScraper(threading.Thread):
             )
             hand_id = cur.lastrowid
             for w in winners:
+                wname = str(w.get("name", "")).strip()
+                wdesc = player_hand_desc.get(wname)
+                wcards = player_cards.get(wname)
+                # No cards visible = everyone folded
+                if not wdesc and not wcards:
+                    wdesc = "All folded"
                 cx.execute(
-                    "INSERT INTO hand_winners (hand_id, player_name, amount_won) "
-                    "VALUES (?, ?, ?)",
+                    "INSERT INTO hand_winners (hand_id, player_name, amount_won, winner_cards, winner_hand_desc) "
+                    "VALUES (?, ?, ?, ?, ?)",
                     (
                         hand_id,
-                        str(w.get("name", "")).strip(),
+                        wname,
                         _parse_winner_prize(w.get("stack_info")),
+                        wcards,
+                        wdesc,
                     ),
                 )
         self.status.hands_recorded += 1
@@ -270,12 +290,34 @@ def _parse_winner_prize(stack_info: Any) -> float | None:
 # ---------------------------------------------------------------------------
 
 class ScraperManager:
+    WATCHDOG_INTERVAL = 15.0  # seconds between liveness checks
+
     def __init__(self) -> None:
         self._workers: dict[int, _SessionScraper] = {}
         self._lock = threading.Lock()
+        self._manually_stopped: set[int] = set()  # sessions the user explicitly stopped
+        self._watchdog = threading.Thread(target=self._watchdog_loop,
+                                          name="scraper-watchdog", daemon=True)
+        self._watchdog.start()
+
+    def _watchdog_loop(self) -> None:
+        while True:
+            time.sleep(self.WATCHDOG_INTERVAL)
+            with self._lock:
+                dead = [
+                    (sid, w) for sid, w in self._workers.items()
+                    if not w.is_alive() and sid not in self._manually_stopped
+                ]
+            for sid, w in dead:
+                log.warning("watchdog: scraper for session %s died — restarting", sid)
+                new_worker = _SessionScraper(sid, w.url, headless=w.headless)
+                with self._lock:
+                    self._workers[sid] = new_worker
+                new_worker.start()
 
     def start(self, session_id: int, url: str, headless: bool = False) -> ScraperStatus:
         with self._lock:
+            self._manually_stopped.discard(session_id)
             existing = self._workers.get(session_id)
             if existing and existing.is_alive():
                 return existing.status
@@ -286,6 +328,7 @@ class ScraperManager:
 
     def stop(self, session_id: int) -> None:
         with self._lock:
+            self._manually_stopped.add(session_id)
             worker = self._workers.get(session_id)
         if worker:
             worker.stop()
