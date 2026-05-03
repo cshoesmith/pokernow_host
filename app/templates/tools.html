@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}{{ session.name }} · Tools{% endblock %}
+{% block content %}
+<section>
+  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+    <div>
+      <h2 style="margin:0;">🛠 Tools — {{ session.name }}
+        <span class="pill {{ session.status }}">{{ session.status }}</span>
+      </h2>
+      <div class="small muted">Setup, scraper control, and corrections. Activity lives on the <a href="/sessions/{{ session.id }}">session view</a>.</div>
+    </div>
+    <a href="/sessions/{{ session.id }}"><button type="button">← Back to session</button></a>
+  </div>
+</section>
+
+<section>
+  <h2>Live PokerNow scraper</h2>
+  <p class="muted" style="margin-top:0;">
+    Launches a Chrome window using Selenium + the Zehmosu PokerNow client.
+    The first time, finish login manually in the opened browser; cookies are saved per session.
+  </p>
+  <div class="stat">
+    <span>Status
+      <span class="pill {{ 'run' if scraper and scraper.running else 'idle' }}">
+        {{ 'running' if scraper and scraper.running else 'idle' }}
+      </span>
+    </span>
+    {% if scraper %}
+      <span>Last poll <b>{% if scraper and scraper.last_poll_at %}{{ scraper.last_poll_at | localtime }}{% else %}—{% endif %}</b></span>
+      <span>Hands <b>{{ scraper.hands_recorded }}</b></span>
+      <span>Snapshots <b>{{ scraper.snapshots_recorded }}</b></span>
+      {% if scraper.players_seen %}
+        <span>Seats: <b>{{ scraper.players_seen | join(', ') }}</b></span>
+      {% endif %}
+    {% endif %}
+  </div>
+  {% if scraper and scraper.last_error %}
+    <p class="err">⚠ {{ scraper.last_error }}</p>
+  {% endif %}
+
+  <form class="inline" method="post" action="/sessions/{{ session.id }}/scraper/start">
+    <input name="url" value="{{ session.pokernow_url or '' }}"
+           placeholder="https://www.pokernow.club/games/... or game ID" style="flex:1; min-width:320px;">
+    <label class="muted"><input type="checkbox" name="headless" value="1"> headless</label>
+    <button class="primary" type="submit">Start / restart</button>
+  </form>
+  <form class="inline" method="post" action="/sessions/{{ session.id }}/scraper/stop">
+    <button type="submit">Stop scraper</button>
+  </form>
+</section>
+
+<div class="grid2">
+  <section>
+    <h2>Add player to session</h2>
+    <p class="muted small" style="margin-top:0;">
+      Players are also auto-added when the scraper sees them at the table; only use this for manual entry.
+    </p>
+    <form class="inline" method="post" action="/sessions/{{ session.id }}/players">
+      <input name="name" placeholder="Player name" required>
+      <input name="seat_name" placeholder="Name at PokerNow seat (defaults to name)">
+      <button type="submit">Add</button>
+    </form>
+
+    <h2 style="margin-top:18px;">Players in this session</h2>
+    <table>
+      <thead><tr><th>Name</th><th>Seat</th></tr></thead>
+      <tbody>
+        {% for p in players %}
+          <tr><td>{{ p.name }}</td><td class="muted">{{ p.seat_name or '—' }}</td></tr>
+        {% else %}
+          <tr><td colspan="2" class="muted">No players yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Ledger mode</h2>
+    <p class="muted small" style="margin-top:0;">
+      <b>Auto</b>: the scraper records buy-ins/rebuys as players appear or add chips, and cash-outs when they leave or the session closes.<br>
+      <b>Manual</b>: all ledger entries are entered by hand from the session view.
+    </p>
+    <div style="margin-bottom:10px;">
+      Current mode: <span class="pill {{ 'run' if session.auto_ledger else 'idle' }}">{{ 'AUTO' if session.auto_ledger else 'MANUAL' }}</span>
+    </div>
+    <form class="inline" method="post" action="/sessions/{{ session.id }}/set_auto_ledger">
+      {% if session.auto_ledger %}
+        <button type="submit">Switch to Manual</button>
+      {% else %}
+        <input type="hidden" name="auto_ledger" value="1">
+        <button class="primary" type="submit">Switch to Auto</button>
+      {% endif %}
+    </form>
+  </section>
+
+  <section>
+    <h2>Session status</h2>
+    <p class="muted small" style="margin-top:0;">
+      Closing a session stops the scraper and freezes its totals into lifetime P&amp;L.
+      {% if session.auto_ledger %} In Auto mode, all remaining players will be cashed out at their last known stack.{% endif %}
+    </p>
+    {% if session.status == 'open' %}
+      <form method="post" action="/sessions/{{ session.id }}/close">
+        <button class="warn" type="submit">Close session</button>
+      </form>
+    {% else %}
+      <form method="post" action="/sessions/{{ session.id }}/reopen">
+        <button type="submit">Reopen session</button>
+      </form>
+    {% endif %}
+  </section>
+</div>
+
+<section>
+  <h2>Edit ledger</h2>
+  <p class="muted small" style="margin-top:0;">Delete a mistaken buy-in or cash-out. Add new entries from the session view.</p>
+  <table>
+    <thead><tr><th>When</th><th>Player</th><th>Kind</th><th class="num">Amount</th><th>Note</th><th></th></tr></thead>
+    <tbody>
+      {% for e in ledger %}
+        <tr>
+          <td class="muted">{{ e.created_at | localtime }}</td>
+          <td>{{ e.player_name }}</td>
+          <td>{{ e.kind }}</td>
+          <td class="num">{{ e.amount | money }}</td>
+          <td class="muted">{{ e.note or '' }}</td>
+          <td>
+            <form method="post" action="/sessions/{{ session.id }}/ledger/{{ e.id }}/delete"
+                  onsubmit="return confirm('Delete this entry?');">
+              <button class="danger" type="submit">×</button>
+            </form>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6" class="muted">No ledger entries yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

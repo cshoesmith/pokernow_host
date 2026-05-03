@@ -1,0 +1,331 @@
+{% extends "base.html" %}
+{% block title %}{{ session.name }}{% endblock %}
+{% block content %}
+<script>
+  // Auto-refresh every 5s, but pause whenever a form field is focused so we
+  // don't wipe out half-typed buy-in entries.
+  (function () {
+    let timer = null;
+    function schedule() {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (document.activeElement &&
+            ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+          schedule();
+          return;
+        }
+        location.reload();
+      }, 5000);
+    }
+    document.addEventListener('DOMContentLoaded', schedule);
+  })();
+</script>
+<section>
+  <div style="display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap;">
+    <div>
+      <h2 style="margin:0;">{{ session.name }}
+        <span class="pill {{ session.status }}">{{ session.status }}</span>
+        <span class="pill {{ 'run' if scraper and scraper.running else 'idle' }}">
+          scraper {{ 'running' if scraper and scraper.running else 'idle' }}
+        </span>
+        <span class="pill {{ 'run' if session.auto_ledger else 'idle' }}" title="Ledger mode">
+          {{ 'auto' if session.auto_ledger else 'manual' }} ledger
+        </span>
+      </h2>
+      <div class="stat">
+        <span>Started <b>{{ session.started_at | localtime }}</b></span>
+        {% if session.ended_at %}<span>Ended <b>{{ session.ended_at | localtime }}</b></span>{% endif %}
+        <span>Bought in <b>{{ totals.bought_in | money }}</b></span>
+        <span>Cashed out <b>{{ totals.cashed_out | money }}</b></span>
+        <span>Live stacks <b>{{ totals.live_stacks | money }}</b></span>
+        {% if scraper %}<span>Hands captured <b>{{ scraper.hands_recorded }}</b></span>{% endif %}
+      </div>
+    </div>
+    <div>
+      <a href="/sessions/{{ session.id }}/tools"><button type="button">🛠 Tools</button></a>
+    </div>
+  </div>
+  {% if scraper and scraper.last_error %}
+    <p class="err" style="margin-bottom:0;">⚠ Scraper: {{ scraper.last_error }} (see Tools to restart)</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Trophies</h2>
+  {% set medals_cls = ['gold', 'silver', 'bronze'] %}
+  {% set medal_icons = ['🥇', '🥈', '🥉'] %}
+  <div class="trophy-grid">
+    <div class="tcard">
+      <h3>🏅 Most hands won</h3>
+      <div class="sub">Top 3 by number of pots awarded by PokerNow this session</div>
+      {% if podium %}
+        <ul class="rank-list">
+          {% for p in podium %}
+            <li class="{{ medals_cls[loop.index0] }}">
+              <span class="medal">{{ medal_icons[loop.index0] }}</span>
+              <span>
+                <span class="who">{{ p.name }}</span>
+                <div class="meta">{{ p.hands_won }} hand{{ '' if p.hands_won == 1 else 's' }}</div>
+              </span>
+              <span class="val small">{{ p.total_won | money }} won</span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <div class="small">No hands recorded yet.</div>
+      {% endif %}
+    </div>
+
+    <div class="tcard">
+      <h3>💰 Biggest single pot</h3>
+      <div class="sub">Largest individual hand won this session</div>
+      {% if big_hand %}
+        <div class="big">{{ big_hand.amount | money }}</div>
+        <div class="small">won by <b>{{ big_hand.name }}</b> · hand #{{ big_hand.hand_number }}</div>
+        <div class="small">{{ big_hand.started_at | localtime }}</div>
+      {% else %}
+        <div class="big small">—</div>
+        <div class="small">No completed hands yet.</div>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Players &amp; live P&amp;L</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th><th>Seat</th>
+        <th class="num">Bought in</th>
+        <th class="num">Cashed out</th>
+        <th class="num">Stack</th>
+        <th class="num">Live P/L</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in players %}
+        <tr>
+          <td>{{ p.name }}</td>
+          <td class="muted">{{ p.seat_name or '—' }}</td>
+          <td class="num">{{ p.bought_in | money }}</td>
+          <td class="num">{{ p.cashed_out | money }}</td>
+          <td class="num">{{ (p.current_stack or 0) | money }}</td>
+          <td class="num {{ 'pos' if p.live_pl > 0 else ('neg' if p.live_pl < 0 else '') }}">
+            {{ p.live_pl | money }}
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6" class="muted">No players yet. Open <a href="/sessions/{{ session.id }}/tools">Tools</a> to add some, or start the scraper to auto-discover them.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if pl_timeline %}
+  <div id="pl-chart-wrap" style="margin-top:14px;">
+    <div id="pl-chart" style="width:100%; height:260px;"></div>
+    <div id="pl-legend" class="small" style="display:flex; flex-wrap:wrap; gap:10px; margin-top:6px;"></div>
+  </div>
+  <script id="pl-data" type="application/json">{{ pl_timeline | tojson }}</script>
+  <script>
+    (function () {
+      const data = JSON.parse(document.getElementById('pl-data').textContent);
+      if (!data || !data.length) return;
+      const wrap = document.getElementById('pl-chart');
+      const legend = document.getElementById('pl-legend');
+      const palette = ['#3ea676','#7fb3ff','#d97757','#c084fc','#facc15','#34d399','#f472b6','#60a5fa','#fb923c','#a3e635'];
+
+      // Collect unified time + value bounds
+      let tMin = Infinity, tMax = -Infinity, vMin = 0, vMax = 0;
+      const series = data.map((s, i) => {
+        const pts = s.points
+          .map(p => ({ t: Date.parse(p.ts), v: p.pl, marker: p.marker, amount: p.amount }))
+          .filter(p => !isNaN(p.t));
+        pts.forEach(p => {
+          if (p.t < tMin) tMin = p.t;
+          if (p.t > tMax) tMax = p.t;
+          if (p.v < vMin) vMin = p.v;
+          if (p.v > vMax) vMax = p.v;
+        });
+        return { name: s.name, color: palette[i % palette.length], pts };
+      }).filter(s => s.pts.length);
+      if (!series.length) return;
+      if (tMax === tMin) tMax = tMin + 1;
+      // Pad value axis
+      if (vMin === vMax) { vMin -= 1; vMax += 1; }
+      const pad = (vMax - vMin) * 0.1;
+      vMin -= pad; vMax += pad;
+
+      function render() {
+        const W = wrap.clientWidth || 600, H = 260;
+        const M = { l: 56, r: 12, t: 10, b: 28 };
+        const iw = W - M.l - M.r, ih = H - M.t - M.b;
+        const x = t => M.l + (t - tMin) / (tMax - tMin) * iw;
+        const y = v => M.t + (1 - (v - vMin) / (vMax - vMin)) * ih;
+
+        // Y ticks (5 lines, "nice" values)
+        function niceTicks(min, max, n) {
+          const span = max - min;
+          const step0 = span / n;
+          const mag = Math.pow(10, Math.floor(Math.log10(step0)));
+          const norm = step0 / mag;
+          const step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+          const start = Math.ceil(min / step) * step;
+          const t = [];
+          for (let v = start; v <= max + 1e-6; v += step) t.push(v);
+          return t;
+        }
+        const yTicks = niceTicks(vMin, vMax, 5);
+        const xTickCount = Math.min(6, Math.max(2, Math.floor(iw / 110)));
+        const xTicks = [];
+        for (let i = 0; i < xTickCount; i++) {
+          xTicks.push(tMin + (tMax - tMin) * i / (xTickCount - 1));
+        }
+        const fmtTime = new Intl.DateTimeFormat(undefined,
+          { hour: '2-digit', minute: '2-digit', hour12: false });
+        const fmtMoney = v => (v < 0 ? '-' : '') + '$' +
+          Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
+
+        let svg = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg" style="display:block;">`;
+        // Grid + y labels
+        for (const v of yTicks) {
+          const yy = y(v);
+          const isZero = Math.abs(v) < 1e-6;
+          svg += `<line x1="${M.l}" x2="${W - M.r}" y1="${yy}" y2="${yy}" stroke="${isZero ? '#3a4654' : '#1f2832'}" stroke-width="${isZero ? 1.2 : 1}"/>`;
+          svg += `<text x="${M.l - 6}" y="${yy + 3}" fill="#8a98a8" font-size="11" text-anchor="end">${fmtMoney(v)}</text>`;
+        }
+        // X labels
+        for (const t of xTicks) {
+          const xx = x(t);
+          svg += `<text x="${xx}" y="${H - 8}" fill="#8a98a8" font-size="11" text-anchor="middle">${fmtTime.format(new Date(t))}</text>`;
+        }
+        // Series paths
+        for (const s of series) {
+          const d = s.pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
+          svg += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>`;
+          // Event markers
+          for (const p of s.pts) {
+            if (!p.marker) continue;
+            const cx = x(p.t).toFixed(1), cy = y(p.v).toFixed(1);
+            const tip = `${s.name} · ${p.marker}${p.amount != null ? ' ' + fmtMoney(p.amount) : ''} · ${fmtTime.format(new Date(p.t))}`;
+            if (p.marker === 'buyin') {
+              svg += `<g><title>${tip}</title>`
+                  + `<circle cx="${cx}" cy="${cy}" r="8" fill="${s.color}" stroke="#0f1419" stroke-width="1.5"/>`
+                  + `<text x="${cx}" y="${cy}" fill="#0f1419" font-size="11" font-weight="700" text-anchor="middle" dominant-baseline="central">$</text>`
+                  + `</g>`;
+            } else if (p.marker === 'cashout') {
+              svg += `<g><title>${tip}</title>`
+                  + `<rect x="${(+cx - 6).toFixed(1)}" y="${(+cy - 6).toFixed(1)}" width="12" height="12" rx="2" fill="#0f1419" stroke="${s.color}" stroke-width="1.5"/>`
+                  + `<text x="${cx}" y="${cy}" fill="${s.color}" font-size="10" font-weight="700" text-anchor="middle" dominant-baseline="central">✓</text>`
+                  + `</g>`;
+            } else if (p.marker === 'adjust') {
+              svg += `<g><title>${tip}</title>`
+                  + `<circle cx="${cx}" cy="${cy}" r="6" fill="#0f1419" stroke="${s.color}" stroke-width="1.5"/>`
+                  + `<text x="${cx}" y="${cy}" fill="${s.color}" font-size="10" font-weight="700" text-anchor="middle" dominant-baseline="central">±</text>`
+                  + `</g>`;
+            }
+          }
+          // Last-point marker
+          const lp = s.pts[s.pts.length - 1];
+          svg += `<circle cx="${x(lp.t).toFixed(1)}" cy="${y(lp.v).toFixed(1)}" r="3" fill="${s.color}"/>`;
+        }
+        svg += `</svg>`;
+        wrap.innerHTML = svg;
+
+        // Legend
+        legend.innerHTML = series.map(s => {
+          const last = s.pts[s.pts.length - 1].v;
+          const cls = last > 0 ? 'pos' : (last < 0 ? 'neg' : 'muted');
+          return `<span style="display:inline-flex;align-items:center;gap:6px;">
+            <span style="width:10px;height:10px;border-radius:2px;background:${s.color};display:inline-block;"></span>
+            <span>${s.name}</span>
+            <span class="${cls}">${fmtMoney(last)}</span>
+          </span>`;
+        }).join('') + ` <span class="muted" style="margin-left:auto;">$ buy-in · ✓ cash-out · ± adjust</span>`;
+      }
+      render();
+      window.addEventListener('resize', render);
+    })();
+  </script>
+  {% endif %}
+</section>
+
+<div class="grid2">
+  {% if not session.auto_ledger %}
+  <section>
+    <h2>Record buy-in / cash-out</h2>
+    {% if players %}
+    <form class="inline" method="post" action="/sessions/{{ session.id }}/ledger">
+      <select name="player_id" required>
+        {% for p in players %}<option value="{{ p.player_id }}">{{ p.name }}</option>{% endfor %}
+      </select>
+      <select name="kind">
+        <option value="buyin">Buy-in</option>
+        <option value="rebuy">Rebuy</option>
+        <option value="cashout">Cash-out</option>
+        <option value="adjust">Adjust</option>
+      </select>
+      <input name="amount" type="number" step="0.01" placeholder="Amount" required style="width:110px;">
+      <input name="note" placeholder="Note (optional)" style="flex:1; min-width:140px;">
+      <button class="primary" type="submit">Record</button>
+    </form>
+    {% else %}
+      <p class="muted">No players yet.</p>
+    {% endif %}
+
+    <h2 style="margin-top:18px;">Ledger</h2>
+    <table>
+      <thead><tr><th>When</th><th>Player</th><th>Kind</th><th class="num">Amount</th><th>Note</th></tr></thead>
+      <tbody>
+        {% for e in ledger %}
+          <tr>
+            <td class="muted">{{ e.created_at | localtime }}</td>
+            <td>{{ e.player_name }}</td>
+            <td>{{ e.kind }}</td>
+            <td class="num">{{ e.amount | money }}</td>
+            <td class="muted">{{ e.note or '' }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5" class="muted">No ledger entries yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if ledger %}
+      <p class="small muted" style="margin-top:6px;">Need to fix an entry? Open <a href="/sessions/{{ session.id }}/tools">Tools</a>.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  <section {% if session.auto_ledger %}style="grid-column: 1 / -1;"{% endif %}>
+    <h2>Recent hands</h2>
+    {% if hands %}
+    <table>
+      <thead><tr><th>#</th><th>Started</th><th class="num">Pot</th><th>Board</th><th>Winners</th></tr></thead>
+      <tbody>
+        {% for h in hands %}
+          {% set pot = h.pot_size or 0 %}
+          <tr>
+            <td>{{ h.hand_number }}</td>
+            <td class="muted">{{ h.started_at | localtime }}</td>
+            <td class="num">{{ pot | money }}</td>
+            <td class="muted">{{ h.board or '—' }}</td>
+            <td>
+              {% for w in winners_by_hand.get(h.id, []) %}
+                {% set amt = w.amount_won or 0 %}
+                {# Guard against legacy rows that stored full stack value as the prize. #}
+                {% set show_amt = amt > 0 and (pot == 0 and amt < 10000 or pot > 0 and amt <= pot * 1.05) %}
+                <span class="pill run" style="margin-right:4px;">
+                  {{ w.player_name }}{% if show_amt %} · {{ amt | money }}{% endif %}
+                </span>
+              {% endfor %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p class="muted">No hands captured yet. Start the scraper from <a href="/sessions/{{ session.id }}/tools">Tools</a>.</p>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

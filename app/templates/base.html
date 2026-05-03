@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}PokerNow Host{% endblock %}</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root { --bg:#0f1419; --panel:#161c24; --line:#262f3a; --text:#e8edf2;
+            --muted:#8a98a8; --accent:#3ea676; --warn:#d97757; --danger:#c0504d; }
+    * { box-sizing: border-box; }
+    body { margin:0; font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif;
+           background:var(--bg); color:var(--text); }
+    a { color:#7fb3ff; text-decoration:none; } a:hover { text-decoration:underline; }
+    header { background:#0a0f14; padding:12px 24px; border-bottom:1px solid var(--line);
+             display:flex; gap:24px; align-items:center; }
+    header h1 { font-size:16px; margin:0; }
+    main { max-width: 1200px; margin: 24px auto; padding: 0 24px; }
+    section { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+              padding:16px 18px; margin-bottom:18px; }
+    h2 { margin:0 0 10px 0; font-size:15px; letter-spacing:.02em; color:#cfd7e0; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+    th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; }
+    tr:last-child td { border-bottom:none; }
+    .num { text-align:right; font-variant-numeric: tabular-nums; }
+    .pos { color:var(--accent); } .neg { color:var(--danger); }
+    .muted { color:var(--muted); }
+    form.inline { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px; }
+    input, select, button { background:#0c1217; color:var(--text); border:1px solid var(--line);
+                            border-radius:5px; padding:6px 9px; font:inherit; }
+    button { cursor:pointer; background:#1f2a36; }
+    button.primary { background:var(--accent); border-color:var(--accent); color:#06140d; font-weight:600; }
+    button.danger { background:var(--danger); border-color:var(--danger); color:#fff; }
+    button.warn   { background:var(--warn); border-color:var(--warn); color:#1a0c06; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px;
+            text-transform:uppercase; letter-spacing:.04em; }
+    .pill.open { background:#1d4d36; color:#9ce5b8; }
+    .pill.closed { background:#3a2a2a; color:#e0a8a4; }
+    .pill.run { background:#1f3a55; color:#9bd0ff; }
+    .pill.idle { background:#272727; color:#999; }
+    .grid2 { display:grid; gap:18px; grid-template-columns: 1fr 1fr; }
+    @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+    .stat { display:flex; gap:24px; flex-wrap:wrap; margin-top:6px; color:var(--muted); }
+    .stat b { color:var(--text); }
+    .err { color:var(--warn); font-size:12px; }
+
+    /* trophies */
+    .trophy-grid { display:grid; gap:14px;
+                   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+                   margin-top:6px; }
+    .tcard { background:#0c1217; border:1px solid var(--line); border-radius:8px;
+             padding:14px 16px; display:flex; flex-direction:column; gap:10px; }
+    .tcard h3 { margin:0; font-size:11px; text-transform:uppercase; letter-spacing:.06em;
+                color:var(--muted); font-weight:600; }
+    .tcard .sub { color:var(--muted); font-size:11px; margin-top:-4px; }
+    .tcard .big { font-size:18px; font-weight:600; }
+    .tcard .small { font-size:12px; color:var(--muted); }
+
+    .rank-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px; }
+    .rank-list li { display:grid; grid-template-columns: 28px 1fr auto; align-items:center;
+                    gap:10px; padding:6px 8px; border-radius:6px; background:#11181f; }
+    .rank-list .medal { font-size:18px; text-align:center; }
+    .rank-list .who   { font-weight:600; }
+    .rank-list .meta  { color:var(--muted); font-size:11px; }
+    .rank-list .val   { color:var(--text); font-variant-numeric: tabular-nums; }
+    .rank-list li.gold   { box-shadow: inset 3px 0 0 #d4a017; }
+    .rank-list li.silver { box-shadow: inset 3px 0 0 #a3aab2; }
+    .rank-list li.bronze { box-shadow: inset 3px 0 0 #a36a3a; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>♠ PokerNow Host Manager</h1>
+    <nav><a href="/">Sessions</a> &nbsp; <a href="/players">Lifetime P&amp;L</a></nav>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <script>
+    // Convert UTC ISO timestamps emitted by the `localtime` Jinja filter, plus
+    // any bare ISO strings inside <td>/<span> elements that look like dates,
+    // into the browser's local timezone.
+    (function () {
+      const fmt = new Intl.DateTimeFormat(undefined, {
+        year: 'numeric', month: 'short', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false,
+      });
+      const tzAbbr = (() => {
+        try {
+          const parts = new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' })
+            .formatToParts(new Date());
+          return (parts.find(p => p.type === 'timeZoneName') || {}).value || '';
+        } catch { return ''; }
+      })();
+      const ISO_RE = /^\s*\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?\s*$/;
+
+      function localize(el, raw) {
+        const d = new Date(raw);
+        if (isNaN(d)) return;
+        const text = fmt.format(d);
+        el.textContent = tzAbbr ? `${text} ${tzAbbr}` : text;
+        el.title = raw + ' (UTC)';
+      }
+
+      // Tagged elements emitted by the `localtime` filter
+      document.querySelectorAll('time.lt[datetime]').forEach(el => {
+        localize(el, el.getAttribute('datetime'));
+      });
+
+      // Catch-all: bare ISO strings inside table cells (legacy templates).
+      document.querySelectorAll('td, span').forEach(el => {
+        if (el.children.length || el.dataset.ltDone) return;
+        const t = el.textContent;
+        if (ISO_RE.test(t)) {
+          el.dataset.ltDone = '1';
+          localize(el, t.trim());
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

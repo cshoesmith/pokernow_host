@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Lifetime P&L{% endblock %}
+{% block content %}
+<section>
+  <h2>Hall of fame</h2>
+  {% set medals_cls = ['gold', 'silver', 'bronze'] %}
+  {% set medal_icons = ['🥇', '🥈', '🥉'] %}
+  <div class="trophy-grid">
+    <div class="tcard">
+      <h3>🏅 Most hands won — all time</h3>
+      <div class="sub">Top 3 by total pots awarded across every session</div>
+      {% if podium %}
+        <ul class="rank-list">
+          {% for p in podium %}
+            <li class="{{ medals_cls[loop.index0] }}">
+              <span class="medal">{{ medal_icons[loop.index0] }}</span>
+              <span>
+                <span class="who">{{ p.name }}</span>
+                <div class="meta">{{ p.hands_won }} hand{{ '' if p.hands_won == 1 else 's' }} · {{ p.sessions_played }} session{{ '' if p.sessions_played == 1 else 's' }}</div>
+              </span>
+              <span class="val small">{{ p.total_won | money }} won</span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <div class="small">No hands recorded yet.</div>
+      {% endif %}
+    </div>
+
+    <div class="tcard">
+      <h3>💰 Biggest single pot — all time</h3>
+      <div class="sub">Largest individual hand ever recorded</div>
+      {% if big_hand %}
+        <div class="big">{{ big_hand.amount | money }}</div>
+        <div class="small">won by <b>{{ big_hand.name }}</b></div>
+        <div class="small">
+          <a href="/sessions/{{ big_hand.session_id }}">{{ big_hand.session_name }}</a>
+          · hand #{{ big_hand.hand_number }}
+        </div>
+      {% else %}
+        <div class="big small">—</div>
+        <div class="small">No completed hands yet.</div>
+      {% endif %}
+    </div>
+
+    <div class="tcard">
+      <h3>🏆 Biggest session win — all time</h3>
+      <div class="sub">Largest net P&amp;L any player has booked in one session (real money, from the ledger)</div>
+      {% if big_session %}
+        <div class="big pos">{{ big_session.pl | money }}</div>
+        <div class="small">won by <b>{{ big_session.name }}</b></div>
+        <div class="small">
+          <a href="/sessions/{{ big_session.session_id }}">{{ big_session.session_name }}</a>
+          {% if big_session.ended_at %} · ended {{ big_session.ended_at | localtime }}{% endif %}
+        </div>
+      {% else %}
+        <div class="big small">—</div>
+        <div class="small">Record buy-ins / cash-outs to populate.</div>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Lifetime player P&amp;L</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Player</th>
+        <th class="num">Sessions</th>
+        <th class="num">Total in</th>
+        <th class="num">Total out</th>
+        <th class="num">Net P/L</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+        <tr>
+          <td>{{ r.name }}</td>
+          <td class="num">{{ r.sessions_played }}</td>
+          <td class="num">{{ r.total_in | money }}</td>
+          <td class="num">{{ r.total_out | money }}</td>
+          <td class="num {{ 'pos' if r.pl > 0 else ('neg' if r.pl < 0 else '') }}">{{ r.pl | money }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="5" class="muted">No data yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
