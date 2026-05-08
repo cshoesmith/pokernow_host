@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Join {{ invite.group_name }}{% endblock %}
+{% block content %}
+<section style="max-width:440px; margin:60px auto;">
+  <h2>Join {{ invite.group_name }}</h2>
+  <p class="muted" style="margin-top:4px;">
+    You've been invited as a
+    <span class="pill {{ 'run' if invite.role == 'manager' else 'idle' }}">{{ invite.role }}</span>.
+    Create a username and password to continue.
+  </p>
+  {% if error %}
+    <p class="err" style="margin-top:8px;">{{ error }}</p>
+  {% endif %}
+  <form method="post" action="/invite/{{ token }}" style="display:flex; flex-direction:column; gap:10px; margin-top:14px;">
+    <input name="username" placeholder="Choose a username" required autocomplete="username">
+    <input name="password" type="password" placeholder="Password (8+ characters)" required autocomplete="new-password">
+    <input name="confirm" type="password" placeholder="Confirm password" required autocomplete="new-password">
+    <button class="primary" type="submit">Create account</button>
+  </form>
+</section>
+{% endblock %}

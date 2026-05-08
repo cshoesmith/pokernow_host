@@ -38,7 +38,7 @@
     <p class="err">⚠ {{ scraper.last_error }}</p>
   {% endif %}
 
-  <form class="inline" method="post" action="/sessions/{{ session.id }}/scraper/start">
+  {% if current_user.role == 'manager' %}
     <input name="url" value="{{ session.pokernow_url or '' }}"
            placeholder="https://www.pokernow.club/games/... or game ID" style="flex:1; min-width:320px;">
     <label class="muted"><input type="checkbox" name="headless" value="1"> headless</label>
@@ -47,9 +47,11 @@
   <form class="inline" method="post" action="/sessions/{{ session.id }}/scraper/stop">
     <button type="submit">Stop scraper</button>
   </form>
+  {% endif %}
 </section>
 
 <div class="grid2">
+  {% if current_user.role == 'manager' %}
   <section>
     <h2>Add player to session</h2>
     <p class="muted small" style="margin-top:0;">
@@ -109,8 +111,10 @@
       </form>
     {% endif %}
   </section>
+  {% endif %}
 </div>
 
+{% if current_user.role == 'manager' %}
 <section>
   <h2>Edit ledger</h2>
   <p class="muted small" style="margin-top:0;">Delete a mistaken buy-in or cash-out. Add new entries from the session view.</p>
@@ -137,4 +141,5 @@
     </tbody>
   </table>
 </section>
+{% endif %}
 {% endblock %}

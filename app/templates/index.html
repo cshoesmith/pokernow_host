@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Sessions{% endblock %}
 {% block content %}
+{% if current_user.role == 'manager' %}
 <section>
   <h2>New session</h2>
   <form class="inline" method="post" action="/sessions">
@@ -15,6 +16,7 @@
     <button class="primary" type="submit">Create</button>
   </form>
 </section>
+{% endif %}
 
 <section>
   <h2>All sessions</h2>
@@ -30,10 +32,12 @@
         <td class="muted">{% if s.ended_at %}{{ s.ended_at | localtime }}{% else %}—{% endif %}</td>
         <td style="display:flex; gap:8px; align-items:center;">
           <a href="/sessions/{{ s.id }}">open →</a>
+          {% if current_user.role == 'manager' %}
           <form method="post" action="/sessions/{{ s.id }}/delete"
                 onsubmit="return confirm('Delete \'{{ s.name }}\' and all its data? This cannot be undone.')">
             <button class="danger" style="padding:2px 8px; font-size:11px;">Delete</button>
           </form>
+          {% endif %}
         </td>
       </tr>
     {% endfor %}

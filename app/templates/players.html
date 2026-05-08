@@ -58,6 +58,27 @@
         <div class="small">Record buy-ins / cash-outs to populate.</div>
       {% endif %}
     </div>
+
+    <div class="tcard">
+      <h3>💸 Most buy-ins — all time</h3>
+      <div class="sub">Top 3 by total number of buy-ins &amp; rebuys across all sessions</div>
+      {% if most_buyins %}
+        <ul class="rank-list">
+          {% for p in most_buyins %}
+            <li class="{{ medals_cls[loop.index0] }}">
+              <span class="medal">{{ medal_icons[loop.index0] }}</span>
+              <span>
+                <span class="who">{{ p.name }}</span>
+                <div class="meta">{{ p.buyin_count }} buy-in{{ '' if p.buyin_count == 1 else 's' }} · {{ p.sessions_played }} session{{ '' if p.sessions_played == 1 else 's' }}</div>
+              </span>
+              <span class="val small">{{ p.total_in | money }} in</span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <div class="small">No buy-ins recorded yet.</div>
+      {% endif %}
+    </div>
   </div>
 </section>
 

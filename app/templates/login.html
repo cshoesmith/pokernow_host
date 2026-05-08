@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sign in · PokerNow Host</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font: 14px/1.45 system-ui, Segoe UI, Roboto, sans-serif;
+      background: #1a4a2e;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* Felt texture via radial gradient layers */
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background:
+        radial-gradient(ellipse at 20% 20%, #1f5c38 0%, transparent 55%),
+        radial-gradient(ellipse at 80% 80%, #143d22 0%, transparent 55%),
+        radial-gradient(ellipse at 60% 10%, #2a6b42 0%, transparent 40%),
+        repeating-linear-gradient(
+          45deg,
+          transparent,
+          transparent 2px,
+          rgba(0,0,0,.04) 2px,
+          rgba(0,0,0,.04) 4px
+        );
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* Floating suit symbols */
+    .suits {
+      position: fixed; inset: 0;
+      pointer-events: none;
+      z-index: 1;
+      overflow: hidden;
+    }
+    .suit {
+      position: absolute;
+      font-size: 48px;
+      opacity: 0.07;
+      animation: drift linear infinite;
+      user-select: none;
+    }
+    .suit.red { color: #cc3333; }
+    .suit.black { color: #fff; }
+
+    @keyframes drift {
+      0%   { transform: translateY(110vh) rotate(0deg);   opacity: 0;    }
+      5%   {                                               opacity: 0.07; }
+      95%  {                                               opacity: 0.07; }
+      100% { transform: translateY(-15vh)  rotate(360deg); opacity: 0;   }
+    }
+
+    /* Card fan decoration */
+    .card-fan {
+      position: fixed;
+      bottom: -40px; right: -30px;
+      display: flex;
+      z-index: 1;
+      pointer-events: none;
+    }
+    .fc {
+      width: 70px; height: 100px;
+      background: #fff;
+      border-radius: 8px;
+      border: 1px solid #ccc;
+      box-shadow: 2px 2px 8px rgba(0,0,0,.4);
+      position: absolute;
+      display: flex; align-items: flex-start; justify-content: flex-start;
+      padding: 6px 8px;
+      font-size: 18px; font-weight: 800;
+      line-height: 1;
+    }
+    .fc.red { color: #cc2222; }
+    .fc:nth-child(1) { transform: rotate(-30deg) translate(-80px,  0px); }
+    .fc:nth-child(2) { transform: rotate(-15deg) translate(-40px,  0px); }
+    .fc:nth-child(3) { transform: rotate(  0deg) translate(  0px,  0px); }
+    .fc:nth-child(4) { transform: rotate( 15deg) translate( 40px,  0px); }
+    .fc:nth-child(5) { transform: rotate( 30deg) translate( 80px,  0px); }
+
+    .card-fan2 {
+      position: fixed;
+      top: -40px; left: -30px;
+      display: flex;
+      z-index: 1;
+      pointer-events: none;
+      transform: rotate(180deg);
+    }
+
+    /* Chip stack decoration */
+    .chips {
+      position: fixed;
+      bottom: 60px; left: 40px;
+      z-index: 1;
+      pointer-events: none;
+      display: flex; gap: 6px; align-items: flex-end;
+    }
+    .chip-stack { display: flex; flex-direction: column-reverse; gap: 0; }
+    .chip {
+      width: 36px; height: 10px;
+      border-radius: 50%;
+      border: 3px solid rgba(255,255,255,.3);
+      margin-bottom: -4px;
+    }
+
+    /* Login card */
+    .login-card {
+      position: relative;
+      z-index: 10;
+      background: rgba(12, 18, 23, 0.92);
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 16px;
+      padding: 40px 36px 36px;
+      width: 100%;
+      max-width: 380px;
+      box-shadow:
+        0 4px 6px rgba(0,0,0,.3),
+        0 20px 60px rgba(0,0,0,.5),
+        inset 0 1px 0 rgba(255,255,255,.08);
+      backdrop-filter: blur(10px);
+      color: #e8edf2;
+    }
+
+    .login-logo {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+    .login-logo .suits-row {
+      font-size: 28px;
+      letter-spacing: 6px;
+      margin-bottom: 6px;
+    }
+    .login-logo .suits-row .r { color: #e05555; }
+    .login-logo .suits-row .b { color: #e8edf2; }
+    .login-logo h1 {
+      font-size: 20px;
+      font-weight: 700;
+      color: #e8edf2;
+      letter-spacing: .04em;
+    }
+    .login-logo p {
+      font-size: 12px;
+      color: #8a98a8;
+      margin-top: 2px;
+    }
+
+    .divider {
+      height: 1px;
+      background: rgba(255,255,255,.08);
+      margin: 0 0 24px;
+    }
+
+    .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+    .field label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #8a98a8; font-weight: 600; }
+    .field input {
+      background: rgba(255,255,255,.06);
+      color: #e8edf2;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font: inherit;
+      font-size: 14px;
+      transition: border-color .15s;
+      outline: none;
+    }
+    .field input:focus { border-color: #3ea676; }
+
+    .btn-signin {
+      width: 100%;
+      padding: 11px;
+      margin-top: 6px;
+      background: linear-gradient(135deg, #3ea676 0%, #2d7d58 100%);
+      color: #06140d;
+      font-weight: 700;
+      font-size: 14px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      letter-spacing: .03em;
+      transition: opacity .15s, transform .1s;
+    }
+    .btn-signin:hover  { opacity: .9; }
+    .btn-signin:active { transform: scale(.98); }
+
+    .err {
+      background: rgba(192,80,77,.18);
+      border: 1px solid rgba(192,80,77,.4);
+      color: #e89090;
+      border-radius: 8px;
+      padding: 9px 12px;
+      font-size: 13px;
+      margin-bottom: 16px;
+    }
+  </style>
+</head>
+<body>
+
+<!-- floating suits -->
+<div class="suits" id="suits"></div>
+
+<!-- corner card fans -->
+<div class="card-fan">
+  <div class="fc red">A<br>♥</div>
+  <div class="fc">K<br>♠</div>
+  <div class="fc red">Q<br>♦</div>
+  <div class="fc">J<br>♣</div>
+  <div class="fc red">T<br>♥</div>
+</div>
+<div class="card-fan2">
+  <div class="fc">2<br>♠</div>
+  <div class="fc red">7<br>♦</div>
+  <div class="fc">9<br>♣</div>
+  <div class="fc red">5<br>♥</div>
+  <div class="fc">3<br>♠</div>
+</div>
+
+<!-- chip stacks -->
+<div class="chips">
+  <div class="chip-stack">
+    <div class="chip" style="background:#c0392b;"></div>
+    <div class="chip" style="background:#c0392b;"></div>
+    <div class="chip" style="background:#c0392b;"></div>
+    <div class="chip" style="background:#c0392b;"></div>
+    <div class="chip" style="background:#c0392b;"></div>
+  </div>
+  <div class="chip-stack">
+    <div class="chip" style="background:#2980b9;"></div>
+    <div class="chip" style="background:#2980b9;"></div>
+    <div class="chip" style="background:#2980b9;"></div>
+  </div>
+  <div class="chip-stack">
+    <div class="chip" style="background:#27ae60;"></div>
+    <div class="chip" style="background:#27ae60;"></div>
+    <div class="chip" style="background:#27ae60;"></div>
+    <div class="chip" style="background:#27ae60;"></div>
+    <div class="chip" style="background:#27ae60;"></div>
+    <div class="chip" style="background:#27ae60;"></div>
+    <div class="chip" style="background:#27ae60;"></div>
+  </div>
+  <div class="chip-stack">
+    <div class="chip" style="background:#8e44ad;"></div>
+    <div class="chip" style="background:#8e44ad;"></div>
+  </div>
+  <div class="chip-stack">
+    <div class="chip" style="background:#e67e22;"></div>
+    <div class="chip" style="background:#e67e22;"></div>
+    <div class="chip" style="background:#e67e22;"></div>
+    <div class="chip" style="background:#e67e22;"></div>
+  </div>
+</div>
+
+<!-- login form -->
+<div class="login-card">
+  <div class="login-logo">
+    <div class="suits-row">
+      <span class="b">♠</span><span class="r">♥</span><span class="b">♣</span><span class="r">♦</span>
+    </div>
+    <h1>PokerNow Host</h1>
+    <p>Texas Hold'em tracker</p>
+  </div>
+  <div class="divider"></div>
+
+  {% if error %}
+    <div class="err">{{ error }}</div>
+  {% endif %}
+
+  <form method="post" action="/login">
+    <div class="field">
+      <label>Username</label>
+      <input name="username" placeholder="Enter your username" required autocomplete="username">
+    </div>
+    <div class="field">
+      <label>Password</label>
+      <input name="password" type="password" placeholder="Enter your password" required autocomplete="current-password">
+    </div>
+    <button class="btn-signin" type="submit">Sign In</button>
+  </form>
+</div>
+
+<script>
+  // Spawn floating suit symbols
+  const suits = ['♠','♥','♣','♦'];
+  const colors = { '♥':'red', '♦':'red', '♠':'black', '♣':'black' };
+  const container = document.getElementById('suits');
+  for (let i = 0; i < 18; i++) {
+    const el = document.createElement('div');
+    const s = suits[Math.floor(Math.random() * 4)];
+    el.className = 'suit ' + colors[s];
+    el.textContent = s;
+    el.style.left = (Math.random() * 100) + 'vw';
+    el.style.fontSize = (30 + Math.random() * 50) + 'px';
+    const dur = 12 + Math.random() * 20;
+    const delay = -(Math.random() * dur);
+    el.style.animation = `drift ${dur}s ${delay}s linear infinite`;
+    container.appendChild(el);
+  }
+</script>
+</body>
+</html>

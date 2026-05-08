@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import secrets as _secrets
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -9,6 +10,10 @@ from datetime import datetime, timezone
 from itertools import groupby
 from pathlib import Path
 from typing import Any, Iterable, Iterator
+
+from passlib.context import CryptContext
+
+_pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 DATA_DIR = Path(os.environ.get("VNBT_POKER_DATA", "data")).resolve()
 DB_PATH = DATA_DIR / "poker.sqlite"
@@ -85,6 +90,30 @@ CREATE INDEX IF NOT EXISTS idx_ledger_session
 
 CREATE INDEX IF NOT EXISTS idx_hands_session
     ON hands(session_id, hand_number DESC);
+
+CREATE TABLE IF NOT EXISTS groups (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id      INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'manager',  -- manager | viewer
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS group_invites (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id   INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    token      TEXT NOT NULL UNIQUE,
+    role       TEXT NOT NULL DEFAULT 'viewer',
+    used       INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -100,11 +129,20 @@ def init_db() -> None:
         existing = {row[1] for row in cx.execute("PRAGMA table_info(sessions)")}
         if "auto_ledger" not in existing:
             cx.execute("ALTER TABLE sessions ADD COLUMN auto_ledger INTEGER NOT NULL DEFAULT 0")
+        if "group_id" not in existing:
+            cx.execute("ALTER TABLE sessions ADD COLUMN group_id INTEGER REFERENCES groups(id)")
         hw_cols = {row[1] for row in cx.execute("PRAGMA table_info(hand_winners)")}
         if "winner_cards" not in hw_cols:
             cx.execute("ALTER TABLE hand_winners ADD COLUMN winner_cards TEXT")
         if "winner_hand_desc" not in hw_cols:
             cx.execute("ALTER TABLE hand_winners ADD COLUMN winner_hand_desc TEXT")
+        # Ensure a default group exists for legacy/existing data.
+        if not list(cx.execute("SELECT id FROM groups LIMIT 1")):
+            cx.execute(
+                "INSERT INTO groups (name, created_at) VALUES ('Default Group', ?)", (now_iso(),)
+            )
+        # Assign any unscoped sessions to group 1.
+        cx.execute("UPDATE sessions SET group_id = 1 WHERE group_id IS NULL")
 
 
 @contextmanager
@@ -269,7 +307,7 @@ def auto_cashout_all_seated(session_id: int) -> None:
             )
 
 
-def lifetime_pl() -> list[dict[str, Any]]:
+def lifetime_pl(group_id: int) -> list[dict[str, Any]]:
     rows = query(
         """
         SELECT
@@ -280,12 +318,15 @@ def lifetime_pl() -> list[dict[str, Any]]:
             COALESCE(SUM(CASE WHEN le.kind = 'cashout'           THEN le.amount END), 0) AS total_out,
             COALESCE(SUM(CASE WHEN le.kind = 'adjust'            THEN le.amount END), 0) AS total_adj
         FROM players p
-        LEFT JOIN ledger_entries le ON le.player_id = p.id
+        JOIN ledger_entries le ON le.player_id = p.id
+        JOIN sessions s ON s.id = le.session_id
+        WHERE s.group_id = ?
         GROUP BY p.id, p.name
         ORDER BY (COALESCE(SUM(CASE WHEN le.kind = 'cashout' THEN le.amount END),0)
                 - COALESCE(SUM(CASE WHEN le.kind IN ('buyin','rebuy') THEN le.amount END),0)
                 + COALESCE(SUM(CASE WHEN le.kind = 'adjust' THEN le.amount END),0)) DESC
-        """
+        """,
+        (group_id,),
     )
     out = []
     for r in rows:
@@ -293,6 +334,65 @@ def lifetime_pl() -> list[dict[str, Any]]:
         d["pl"] = float(d["total_out"] or 0) - float(d["total_in"] or 0) + float(d["total_adj"] or 0)
         out.append(d)
     return out
+
+
+# ---------- auth / tenancy -------------------------------------------------
+
+def has_any_user() -> bool:
+    return bool(query_one("SELECT id FROM users LIMIT 1"))
+
+
+def create_group(name: str) -> int:
+    return execute(
+        "INSERT INTO groups (name, created_at) VALUES (?, ?)",
+        (name.strip() or "My Group", now_iso()),
+    )
+
+
+def create_user(group_id: int, username: str, password: str, role: str = "manager") -> int:
+    hashed = _pwd_context.hash(password)
+    return execute(
+        "INSERT INTO users (group_id, username, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
+        (group_id, username.strip(), hashed, role, now_iso()),
+    )
+
+
+def verify_user(username: str, password: str) -> dict[str, Any] | None:
+    row = query_one("SELECT * FROM users WHERE username = ?", (username.strip(),))
+    if not row:
+        _pwd_context.dummy_verify()  # constant-time guard against user enumeration
+        return None
+    if not _pwd_context.verify(password, row["password_hash"]):
+        return None
+    return dict(row)
+
+
+def get_user(user_id: int) -> dict[str, Any] | None:
+    row = query_one("SELECT * FROM users WHERE id = ?", (user_id,))
+    return dict(row) if row else None
+
+
+def create_invite(group_id: int, role: str = "viewer") -> str:
+    token = _secrets.token_urlsafe(32)
+    execute(
+        "INSERT INTO group_invites (group_id, token, role, used, created_at) VALUES (?, ?, ?, 0, ?)",
+        (group_id, token, role, now_iso()),
+    )
+    return token
+
+
+def get_invite(token: str) -> dict[str, Any] | None:
+    row = query_one(
+        "SELECT gi.*, g.name AS group_name FROM group_invites gi "
+        "JOIN groups g ON g.id = gi.group_id "
+        "WHERE gi.token = ? AND gi.used = 0",
+        (token,),
+    )
+    return dict(row) if row else None
+
+
+def consume_invite(token: str) -> None:
+    execute("UPDATE group_invites SET used = 1 WHERE token = ?", (token,))
 
 
 # ---------- trophies / podiums ---------------------------------------------
@@ -319,8 +419,8 @@ def session_hand_wins(session_id: int) -> list[dict[str, Any]]:
     )]
 
 
-def lifetime_hand_wins() -> list[dict[str, Any]]:
-    """Top players by number of hands won across all sessions."""
+def lifetime_hand_wins(group_id: int) -> list[dict[str, Any]]:
+    """Top players by number of hands won across all sessions in this group."""
     return [dict(r) for r in query(
         """
         SELECT hw.player_name AS name,
@@ -334,14 +434,16 @@ def lifetime_hand_wins() -> list[dict[str, Any]]:
                COUNT(DISTINCT h.session_id) AS sessions_played
         FROM hand_winners hw
         JOIN hands h ON h.id = hw.hand_id
-        WHERE TRIM(hw.player_name) <> ''
+        JOIN sessions s ON s.id = h.session_id
+        WHERE s.group_id = ? AND TRIM(hw.player_name) <> ''
         GROUP BY hw.player_name
         ORDER BY hands_won DESC, total_won DESC
-        """
+        """,
+        (group_id,),
     )]
 
 
-def biggest_hand(session_id: int | None = None) -> dict[str, Any] | None:
+def biggest_hand(session_id: int | None = None, group_id: int | None = None) -> dict[str, Any] | None:
     """Single largest hand win. Falls back to pot size if amount_won is null."""
     # Sanitize: legacy rows stored a player's full stack as amount_won. If the
     # recorded prize is wildly larger than the pot, fall back to pot_size; if
@@ -367,9 +469,11 @@ def biggest_hand(session_id: int | None = None) -> dict[str, Any] | None:
             JOIN sessions s ON s.id = h.session_id
             WHERE {sane_amount} IS NOT NULL
               AND TRIM(hw.player_name) <> ''
+              AND (? IS NULL OR s.group_id = ?)
             ORDER BY amount DESC
             LIMIT 1
-            """
+            """,
+            (group_id, group_id),
         )
     else:
         rows = query(
@@ -393,7 +497,7 @@ def biggest_hand(session_id: int | None = None) -> dict[str, Any] | None:
     return dict(rows[0]) if rows else None
 
 
-def biggest_session_win() -> dict[str, Any] | None:
+def biggest_session_win(group_id: int) -> dict[str, Any] | None:
     """Largest net P&L for one player in one (closed) session, ledger-based."""
     rows = query(
         """
@@ -407,15 +511,53 @@ def biggest_session_win() -> dict[str, Any] | None:
         FROM ledger_entries le
         JOIN players  p ON p.id = le.player_id
         JOIN sessions s ON s.id = le.session_id
+        WHERE s.group_id = ?
         GROUP BY p.id, s.id
         ORDER BY pl DESC
         LIMIT 1
-        """
+        """,
+        (group_id,),
     )
     if not rows:
         return None
     row = dict(rows[0])
     return row if (row.get("pl") or 0) > 0 else None
+
+
+def session_most_buyins(session_id: int) -> list[dict[str, Any]]:
+    """Top players by number of buy-ins + rebuys in this session."""
+    return [dict(r) for r in query(
+        """
+        SELECT p.name      AS name,
+               COUNT(*)    AS buyin_count,
+               SUM(le.amount) AS total_in
+        FROM ledger_entries le
+        JOIN players p ON p.id = le.player_id
+        WHERE le.session_id = ? AND le.kind IN ('buyin', 'rebuy')
+        GROUP BY p.id, p.name
+        ORDER BY buyin_count DESC, total_in DESC
+        """,
+        (session_id,),
+    )]
+
+
+def lifetime_most_buyins(group_id: int) -> list[dict[str, Any]]:
+    """Top players by number of buy-ins + rebuys across all sessions in this group."""
+    return [dict(r) for r in query(
+        """
+        SELECT p.name      AS name,
+               COUNT(*)    AS buyin_count,
+               SUM(le.amount) AS total_in,
+               COUNT(DISTINCT le.session_id) AS sessions_played
+        FROM ledger_entries le
+        JOIN players p ON p.id = le.player_id
+        JOIN sessions s ON s.id = le.session_id
+        WHERE le.kind IN ('buyin', 'rebuy') AND s.group_id = ?
+        GROUP BY p.id, p.name
+        ORDER BY buyin_count DESC, total_in DESC
+        """,
+        (group_id,),
+    )]
 
 
 def session_pl_timeline(session_id: int) -> list[dict[str, Any]]:

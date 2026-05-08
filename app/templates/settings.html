@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<section>
+  <h2>⚙ Group settings</h2>
+
+  {% if flash_invite %}
+  <div style="background:#1d4d36; border:1px solid #3ea676; border-radius:6px; padding:14px 16px; margin-bottom:16px;">
+    <div style="font-weight:600; color:#9ce5b8; margin-bottom:6px;">✓ Invite link generated — share it once</div>
+    <div style="word-break:break-all; font-family:monospace; font-size:13px; background:#0a1a12; padding:8px 10px; border-radius:4px; color:#cfd7e0;">{{ request.base_url }}invite/{{ flash_invite }}</div>
+    <div class="small muted" style="margin-top:6px;">This link is single-use and will expire once accepted.</div>
+  </div>
+  {% endif %}
+
+  <h3 style="font-size:13px; margin-bottom:6px;">Invite a member</h3>
+  <p class="muted small" style="margin-top:0;">
+    Generate a one-time invite link. The recipient chooses their own username and password.
+    <b>Viewers</b> can see all sessions and stats but cannot make changes.
+    <b>Managers</b> get full access.
+  </p>
+  <form method="post" action="/settings/invite" class="inline">
+    <select name="role">
+      <option value="viewer">Viewer (read-only)</option>
+      <option value="manager">Manager (full access)</option>
+    </select>
+    <button class="primary" type="submit">Generate invite link</button>
+  </form>
+</section>
+{% endblock %}

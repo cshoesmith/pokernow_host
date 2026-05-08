@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.sessions import SessionMiddleware
 
 from . import db
 from .scraper import manager as scraper_manager
@@ -63,6 +66,7 @@ templates.env.filters["cards"] = _cards_filter
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.init_db()
+    scraper_manager.kill_orphan_chromes()
     # Auto-resume scrapers for open sessions that have a PokerNow URL.
     open_sessions = db.query(
         "SELECT id, pokernow_url FROM sessions WHERE status='open' AND pokernow_url IS NOT NULL"
@@ -76,28 +80,75 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="PokerNow Host Manager", lifespan=lifespan)
 
+SECRET_KEY = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, https_only=False)
+
+
+# --------------------------------------------------------------------------
+# Auth helpers
+# --------------------------------------------------------------------------
+
+class RedirectException(Exception):
+    def __init__(self, url: str):
+        self.url = url
+
+
+@app.exception_handler(RedirectException)
+async def _redirect_handler(request: Request, exc: RedirectException):
+    return RedirectResponse(exc.url, status_code=303)
+
+
+def get_current_user(request: Request) -> dict:
+    """FastAPI dependency: returns the logged-in user dict or redirects."""
+    if not db.has_any_user():
+        raise RedirectException("/setup")
+    user_id = request.session.get("user_id")
+    if not user_id:
+        raise RedirectException("/login")
+    user = db.get_user(user_id)
+    if not user:
+        request.session.clear()
+        raise RedirectException("/login")
+    return user
+
+
+def _require_manager(user: dict) -> None:
+    if user["role"] != "manager":
+        raise HTTPException(403, "Manager access required")
+
+
+def _get_session_or_404(session_id: int, group_id: int):
+    session = db.query_one(
+        "SELECT * FROM sessions WHERE id = ? AND group_id = ?", (session_id, group_id)
+    )
+    if not session:
+        raise HTTPException(404)
+    return session
+
 
 # --------------------------------------------------------------------------
 # Pages
 # --------------------------------------------------------------------------
 
 @app.get("/")
-def index(request: Request):
+def index(request: Request, current_user: dict = Depends(get_current_user)):
     sessions = db.query(
-        "SELECT * FROM sessions ORDER BY status='open' DESC, started_at DESC"
+        "SELECT * FROM sessions WHERE group_id = ? ORDER BY status='open' DESC, started_at DESC",
+        (current_user["group_id"],),
     )
+    flash_invite = request.session.get("flash_invite")
+    if flash_invite:
+        del request.session["flash_invite"]
     return templates.TemplateResponse(
         request,
         "index.html",
-        {"sessions": sessions},
+        {"sessions": sessions, "current_user": current_user, "flash_invite": flash_invite},
     )
 
 
 @app.get("/sessions/{session_id}")
-def session_view(session_id: int, request: Request):
-    session = db.query_one("SELECT * FROM sessions WHERE id = ?", (session_id,))
-    if not session:
-        raise HTTPException(404)
+def session_view(session_id: int, request: Request, current_user: dict = Depends(get_current_user)):
+    session = _get_session_or_404(session_id, current_user["group_id"])
     players = db.session_player_summary(session_id)
     ledger = db.query(
         """
@@ -131,6 +182,7 @@ def session_view(session_id: int, request: Request):
     }
     podium = db.session_hand_wins(session_id)[:3]
     big_hand = db.biggest_hand(session_id)
+    most_buyins = db.session_most_buyins(session_id)[:3]
     return templates.TemplateResponse(
         request,
         "session.html",
@@ -144,30 +196,33 @@ def session_view(session_id: int, request: Request):
             "totals": totals,
             "podium": podium,
             "big_hand": big_hand,
+            "most_buyins": most_buyins,
             "pl_timeline": db.session_pl_timeline(session_id),
+            "current_user": current_user,
         },
     )
 
 
 @app.get("/players")
-def players_view(request: Request):
+def players_view(request: Request, current_user: dict = Depends(get_current_user)):
+    gid = current_user["group_id"]
     return templates.TemplateResponse(
         request,
         "players.html",
         {
-            "rows": db.lifetime_pl(),
-            "podium": db.lifetime_hand_wins()[:3],
-            "big_hand": db.biggest_hand(None),
-            "big_session": db.biggest_session_win(),
+            "rows": db.lifetime_pl(gid),
+            "podium": db.lifetime_hand_wins(gid)[:3],
+            "big_hand": db.biggest_hand(None, gid),
+            "big_session": db.biggest_session_win(gid),
+            "most_buyins": db.lifetime_most_buyins(gid)[:3],
+            "current_user": current_user,
         },
     )
 
 
 @app.get("/sessions/{session_id}/tools")
-def tools_view(session_id: int, request: Request):
-    session = db.query_one("SELECT * FROM sessions WHERE id = ?", (session_id,))
-    if not session:
-        raise HTTPException(404)
+def tools_view(session_id: int, request: Request, current_user: dict = Depends(get_current_user)):
+    session = _get_session_or_404(session_id, current_user["group_id"])
     players = db.session_player_summary(session_id)
     ledger = db.query(
         """
@@ -187,6 +242,7 @@ def tools_view(session_id: int, request: Request):
             "players": players,
             "ledger": ledger,
             "scraper": scraper_manager.status(session_id),
+            "current_user": current_user,
         },
     )
 
@@ -196,17 +252,20 @@ def tools_view(session_id: int, request: Request):
 # --------------------------------------------------------------------------
 
 @app.post("/sessions")
-def create_session(name: str = Form(...), pokernow_url: str = Form(""),
-                   auto_ledger: str = Form(""), headless: str = Form("")):
+def create_session(request: Request, name: str = Form(...), pokernow_url: str = Form(""),
+                   auto_ledger: str = Form(""), headless: str = Form(""),
+                   current_user: dict = Depends(get_current_user)):
+    _require_manager(current_user)
     table_url = _normalize_pokernow_url(pokernow_url)
     sid = db.execute(
-        "INSERT INTO sessions (name, pokernow_url, status, auto_ledger, started_at) "
-        "VALUES (?, ?, 'open', ?, ?)",
+        "INSERT INTO sessions (name, pokernow_url, status, auto_ledger, started_at, group_id) "
+        "VALUES (?, ?, 'open', ?, ?, ?)",
         (
             name.strip() or "Untitled session",
             table_url or None,
             1 if auto_ledger else 0,
             db.now_iso(),
+            current_user["group_id"],
         ),
     )
     if table_url:
@@ -215,9 +274,10 @@ def create_session(name: str = Form(...), pokernow_url: str = Form(""),
 
 
 @app.post("/sessions/{session_id}/close")
-def close_session(session_id: int):
-    session = db.query_one("SELECT * FROM sessions WHERE id = ?", (session_id,))
-    if session and session["auto_ledger"]:
+def close_session(session_id: int, current_user: dict = Depends(get_current_user)):
+    _require_manager(current_user)
+    session = _get_session_or_404(session_id, current_user["group_id"])
+    if session["auto_ledger"]:
         db.auto_cashout_all_seated(session_id)
     db.execute(
         "UPDATE sessions SET status='closed', ended_at=? WHERE id=?",
@@ -228,7 +288,9 @@ def close_session(session_id: int):
 
 
 @app.post("/sessions/{session_id}/reopen")
-def reopen_session(session_id: int):
+def reopen_session(session_id: int, current_user: dict = Depends(get_current_user)):
+    _require_manager(current_user)
+    _get_session_or_404(session_id, current_user["group_id"])
     db.execute(
         "UPDATE sessions SET status='open', ended_at=NULL WHERE id=?",
         (session_id,),
@@ -237,14 +299,19 @@ def reopen_session(session_id: int):
 
 
 @app.post("/sessions/{session_id}/delete")
-def delete_session(session_id: int):
+def delete_session(session_id: int, current_user: dict = Depends(get_current_user)):
+    _require_manager(current_user)
+    _get_session_or_404(session_id, current_user["group_id"])
     scraper_manager.stop(session_id)
     db.execute("DELETE FROM sessions WHERE id=?", (session_id,))
     return RedirectResponse("/", status_code=303)
 
 
 @app.post("/sessions/{session_id}/set_auto_ledger")
-def set_auto_ledger(session_id: int, auto_ledger: str = Form("")):
+def set_auto_ledger(session_id: int, auto_ledger: str = Form(""),
+                    current_user: dict = Depends(get_current_user)):
+    _require_manager(current_user)
+    _get_session_or_404(session_id, current_user["group_id"])
     db.execute(
         "UPDATE sessions SET auto_ledger=? WHERE id=?",
         (1 if auto_ledger else 0, session_id),
@@ -253,7 +320,10 @@ def set_auto_ledger(session_id: int, auto_ledger: str = Form("")):
 
 
 @app.post("/sessions/{session_id}/players")
-def add_player(session_id: int, name: str = Form(...), seat_name: str = Form("")):
+def add_player(session_id: int, name: str = Form(...), seat_name: str = Form(""),
+               current_user: dict = Depends(get_current_user)):
+    _require_manager(current_user)
+    _get_session_or_404(session_id, current_user["group_id"])
     pid = db.get_or_create_player(name)
     db.add_session_player(session_id, pid, seat_name.strip() or name.strip())
     return RedirectResponse(f"/sessions/{session_id}", status_code=303)
@@ -266,7 +336,10 @@ def add_ledger(
     kind: str = Form(...),
     amount: float = Form(...),
     note: str = Form(""),
+    current_user: dict = Depends(get_current_user),
 ):
+    _require_manager(current_user)
+    _get_session_or_404(session_id, current_user["group_id"])
     if kind not in {"buyin", "rebuy", "cashout", "adjust"}:
         raise HTTPException(400, "invalid kind")
     db.execute(
@@ -278,7 +351,10 @@ def add_ledger(
 
 
 @app.post("/sessions/{session_id}/ledger/{entry_id}/delete")
-def delete_ledger(session_id: int, entry_id: int):
+def delete_ledger(session_id: int, entry_id: int,
+                  current_user: dict = Depends(get_current_user)):
+    _require_manager(current_user)
+    _get_session_or_404(session_id, current_user["group_id"])
     db.execute(
         "DELETE FROM ledger_entries WHERE id=? AND session_id=?",
         (entry_id, session_id),
@@ -287,10 +363,10 @@ def delete_ledger(session_id: int, entry_id: int):
 
 
 @app.post("/sessions/{session_id}/scraper/start")
-def start_scraper(session_id: int, url: str = Form(""), headless: str = Form("")):
-    session = db.query_one("SELECT * FROM sessions WHERE id=?", (session_id,))
-    if not session:
-        raise HTTPException(404)
+def start_scraper(session_id: int, url: str = Form(""), headless: str = Form(""),
+                  current_user: dict = Depends(get_current_user)):
+    _require_manager(current_user)
+    session = _get_session_or_404(session_id, current_user["group_id"])
     table_url = _normalize_pokernow_url(url.strip() or (session["pokernow_url"] or ""))
     if not table_url:
         raise HTTPException(400, "PokerNow URL or game ID required")
@@ -320,6 +396,155 @@ def _normalize_pokernow_url(value: str) -> str:
 
 
 @app.post("/sessions/{session_id}/scraper/stop")
-def stop_scraper(session_id: int):
+def stop_scraper(session_id: int, current_user: dict = Depends(get_current_user)):
+    _require_manager(current_user)
+    _get_session_or_404(session_id, current_user["group_id"])
     scraper_manager.stop(session_id)
     return RedirectResponse(f"/sessions/{session_id}", status_code=303)
+
+
+# --------------------------------------------------------------------------
+# Auth routes (no login required)
+# --------------------------------------------------------------------------
+
+@app.get("/login")
+def login_page(request: Request):
+    if request.session.get("user_id"):
+        return RedirectResponse("/", status_code=303)
+    return templates.TemplateResponse(request, "login.html", {"current_user": None, "error": None})
+
+
+@app.post("/login")
+def login(request: Request, username: str = Form(...), password: str = Form(...)):
+    user = db.verify_user(username, password)
+    if not user:
+        return templates.TemplateResponse(
+            request, "login.html",
+            {"current_user": None, "error": "Invalid username or password"},
+            status_code=401,
+        )
+    request.session["user_id"] = user["id"]
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/logout")
+def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse("/login", status_code=303)
+
+
+@app.get("/setup")
+def setup_page(request: Request):
+    if db.has_any_user():
+        return RedirectResponse("/", status_code=303)
+    return templates.TemplateResponse(request, "setup.html", {"current_user": None, "error": None})
+
+
+@app.post("/setup")
+def setup(
+    request: Request,
+    group_name: str = Form(...),
+    username: str = Form(...),
+    password: str = Form(...),
+    confirm: str = Form(...),
+):
+    if db.has_any_user():
+        return RedirectResponse("/", status_code=303)
+    if password != confirm:
+        return templates.TemplateResponse(
+            request, "setup.html",
+            {"current_user": None, "error": "Passwords do not match"},
+            status_code=400,
+        )
+    if len(password) < 8:
+        return templates.TemplateResponse(
+            request, "setup.html",
+            {"current_user": None, "error": "Password must be at least 8 characters"},
+            status_code=400,
+        )
+    # Use the default group created by init_db (id=1), update its name.
+    existing = db.query_one("SELECT id FROM groups WHERE id = 1")
+    if existing:
+        db.execute("UPDATE groups SET name = ? WHERE id = 1", (group_name.strip() or "My Group",))
+        gid = 1
+    else:
+        gid = db.create_group(group_name)
+    db.create_user(gid, username, password, "manager")
+    user = db.verify_user(username, password)
+    request.session["user_id"] = user["id"]
+    return RedirectResponse("/", status_code=303)
+
+
+@app.get("/invite/{token}")
+def invite_page(token: str, request: Request):
+    invite = db.get_invite(token)
+    if not invite:
+        raise HTTPException(404, "Invite not found or already used")
+    return templates.TemplateResponse(
+        request, "invite.html",
+        {"current_user": None, "invite": invite, "token": token, "error": None},
+    )
+
+
+@app.post("/invite/{token}")
+def accept_invite(
+    token: str,
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    confirm: str = Form(...),
+):
+    invite = db.get_invite(token)
+    if not invite:
+        raise HTTPException(404, "Invite not found or already used")
+    if password != confirm:
+        return templates.TemplateResponse(
+            request, "invite.html",
+            {"current_user": None, "invite": invite, "token": token, "error": "Passwords do not match"},
+            status_code=400,
+        )
+    if len(password) < 8:
+        return templates.TemplateResponse(
+            request, "invite.html",
+            {"current_user": None, "invite": invite, "token": token, "error": "Password must be at least 8 characters"},
+            status_code=400,
+        )
+    try:
+        uid = db.create_user(invite["group_id"], username, password, invite["role"])
+    except Exception:
+        return templates.TemplateResponse(
+            request, "invite.html",
+            {"current_user": None, "invite": invite, "token": token, "error": "Username already taken"},
+            status_code=400,
+        )
+    db.consume_invite(token)
+    request.session["user_id"] = uid
+    return RedirectResponse("/", status_code=303)
+
+
+# --------------------------------------------------------------------------
+# Settings (manager only)
+# --------------------------------------------------------------------------
+
+@app.get("/settings")
+def settings_page(request: Request, current_user: dict = Depends(get_current_user)):
+    _require_manager(current_user)
+    flash_invite = request.session.get("flash_invite")
+    if flash_invite:
+        del request.session["flash_invite"]
+    return templates.TemplateResponse(
+        request, "settings.html",
+        {"current_user": current_user, "flash_invite": flash_invite},
+    )
+
+
+@app.post("/settings/invite")
+def create_invite_link(
+    request: Request,
+    role: str = Form("viewer"),
+    current_user: dict = Depends(get_current_user),
+):
+    _require_manager(current_user)
+    token = db.create_invite(current_user["group_id"], role)
+    request.session["flash_invite"] = token
+    return RedirectResponse("/settings", status_code=303)

@@ -88,6 +88,27 @@
         <div class="small">No completed hands yet.</div>
       {% endif %}
     </div>
+
+    <div class="tcard">
+      <h3>💸 Most buy-ins</h3>
+      <div class="sub">Top 3 by number of buy-ins &amp; rebuys this session</div>
+      {% if most_buyins %}
+        <ul class="rank-list">
+          {% for p in most_buyins %}
+            <li class="{{ medals_cls[loop.index0] }}">
+              <span class="medal">{{ medal_icons[loop.index0] }}</span>
+              <span>
+                <span class="who">{{ p.name }}</span>
+                <div class="meta">{{ p.buyin_count }} buy-in{{ '' if p.buyin_count == 1 else 's' }}</div>
+              </span>
+              <span class="val small">{{ p.total_in | money }} in</span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <div class="small">No buy-ins recorded yet.</div>
+      {% endif %}
+    </div>
   </div>
 </section>
 
@@ -134,29 +155,32 @@
       const wrap = document.getElementById('pl-chart');
       const legend = document.getElementById('pl-legend');
       const palette = ['#3ea676','#7fb3ff','#d97757','#c084fc','#facc15','#34d399','#f472b6','#60a5fa','#fb923c','#a3e635'];
+      let focused = null;
 
-      // Collect unified time + value bounds
-      let tMin = Infinity, tMax = -Infinity, vMin = 0, vMax = 0;
+      // Pre-parse all series (bounds computed per-render based on focus)
       const series = data.map((s, i) => {
         const pts = s.points
           .map(p => ({ t: Date.parse(p.ts), v: p.pl, marker: p.marker, amount: p.amount }))
           .filter(p => !isNaN(p.t));
-        pts.forEach(p => {
+        return { name: s.name, color: palette[i % palette.length], pts };
+      }).filter(s => s.pts.length);
+      if (!series.length) return;
+
+      function render() {
+        // Compute axis bounds from visible series only
+        const visible = focused ? series.filter(s => s.name === focused) : series;
+        let tMin = Infinity, tMax = -Infinity, vMin = 0, vMax = 0;
+        visible.forEach(s => s.pts.forEach(p => {
           if (p.t < tMin) tMin = p.t;
           if (p.t > tMax) tMax = p.t;
           if (p.v < vMin) vMin = p.v;
           if (p.v > vMax) vMax = p.v;
-        });
-        return { name: s.name, color: palette[i % palette.length], pts };
-      }).filter(s => s.pts.length);
-      if (!series.length) return;
-      if (tMax === tMin) tMax = tMin + 1;
-      // Pad value axis
-      if (vMin === vMax) { vMin -= 1; vMax += 1; }
-      const pad = (vMax - vMin) * 0.1;
-      vMin -= pad; vMax += pad;
-
-      function render() {
+        }));
+        if (!isFinite(tMin)) return;
+        if (tMax === tMin) tMax = tMin + 1;
+        if (vMin === vMax) { vMin -= 1; vMax += 1; }
+        const pad = (vMax - vMin) * 0.1;
+        vMin -= pad; vMax += pad;
         const W = wrap.clientWidth || 600, H = 260;
         const M = { l: 56, r: 12, t: 10, b: 28 };
         const iw = W - M.l - M.r, ih = H - M.t - M.b;
@@ -201,6 +225,7 @@
         }
         // Series paths
         for (const s of series) {
+          if (focused && s.name !== focused) continue;
           const d = s.pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
           svg += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>`;
           // Event markers
@@ -236,12 +261,27 @@
         legend.innerHTML = series.map(s => {
           const last = s.pts[s.pts.length - 1].v;
           const cls = last > 0 ? 'pos' : (last < 0 ? 'neg' : 'muted');
-          return `<span style="display:inline-flex;align-items:center;gap:6px;">
-            <span style="width:10px;height:10px;border-radius:2px;background:${s.color};display:inline-block;"></span>
+          const isFocused = focused === s.name;
+          const isDimmed = focused && !isFocused;
+          return `<span data-name="${s.name}" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;
+            padding:3px 7px;border-radius:5px;transition:background .15s;user-select:none;
+            background:${isFocused ? 'rgba(255,255,255,.1)' : 'transparent'};
+            opacity:${isDimmed ? 0.35 : 1};"
+            title="${isFocused ? 'Click to show all' : 'Click to focus'}">
+            <span style="width:10px;height:10px;border-radius:2px;background:${s.color};display:inline-block;
+              outline:${isFocused ? '2px solid ' + s.color : 'none'};outline-offset:1px;"></span>
             <span>${s.name}</span>
             <span class="${cls}">${fmtMoney(last)}</span>
           </span>`;
         }).join('') + ` <span class="muted" style="margin-left:auto;">$ buy-in · ✓ cash-out · ± adjust</span>`;
+
+        // Wire up legend click-to-focus
+        legend.querySelectorAll('[data-name]').forEach(el => {
+          el.addEventListener('click', () => {
+            focused = (focused === el.dataset.name) ? null : el.dataset.name;
+            render();
+          });
+        });
       }
       render();
       window.addEventListener('resize', render);
@@ -251,7 +291,7 @@
 </section>
 
 <div class="grid2">
-  {% if not session.auto_ledger %}
+  {% if not session.auto_ledger and current_user.role == 'manager' %}
   <section>
     <h2>Record buy-in / cash-out</h2>
     {% if players %}

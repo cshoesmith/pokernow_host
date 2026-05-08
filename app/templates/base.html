@@ -80,7 +80,18 @@
 <body>
   <header>
     <h1>♠ PokerNow Host Manager</h1>
-    <nav><a href="/">Sessions</a> &nbsp; <a href="/players">Lifetime P&amp;L</a></nav>
+    <nav>
+      <a href="/">Sessions</a> &nbsp; <a href="/players">Lifetime P&amp;L</a>
+      {% if current_user and current_user.role == 'manager' %} &nbsp; <a href="/settings">Settings</a>{% endif %}
+    </nav>
+    {% if current_user %}
+    <div style="margin-left:auto; display:flex; align-items:center; gap:12px; font-size:12px; color:var(--muted);">
+      <span>{{ current_user.username }} <span class="pill {{ 'run' if current_user.role == 'manager' else 'idle' }}">{{ current_user.role }}</span></span>
+      <form method="post" action="/logout" style="margin:0;">
+        <button type="submit" style="padding:4px 10px; font-size:12px;">Log out</button>
+      </form>
+    </div>
+    {% endif %}
   </header>
   <main>
     {% block content %}{% endblock %}

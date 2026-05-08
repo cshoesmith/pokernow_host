@@ -6,15 +6,49 @@ One worker per session_id; manage via ScraperManager.
 from __future__ import annotations
 
 import logging
+import os
+import signal
 import threading
 import time
 import traceback
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from . import db
 
 log = logging.getLogger("scraper")
+
+PID_DIR = Path("data/chrome_pids")
+
+
+def _write_pid(session_id: int, pid: int) -> None:
+    PID_DIR.mkdir(parents=True, exist_ok=True)
+    (PID_DIR / f"session_{session_id}.pid").write_text(str(pid))
+
+
+def _clear_pid(session_id: int) -> None:
+    try:
+        (PID_DIR / f"session_{session_id}.pid").unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def kill_orphan_chromes() -> None:
+    """Kill any Chrome processes whose PIDs were written by a previous run."""
+    if not PID_DIR.exists():
+        return
+    for pid_file in PID_DIR.glob("*.pid"):
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+            log.info("killed orphan Chrome PID %s", pid)
+        except (ProcessLookupError, PermissionError):
+            pass  # already gone
+        except Exception as e:
+            log.warning("could not kill orphan Chrome PID from %s: %s", pid_file, e)
+        finally:
+            pid_file.unlink(missing_ok=True)
 
 
 @dataclass
@@ -108,8 +142,17 @@ class _SessionScraper(threading.Thread):
         if self.headless:
             opts.add_argument("--headless=new")
         opts.add_argument("--window-size=1280,900")
+        # Use a session-specific profile dir so each scraper gets its own Chrome instance.
+        profile_dir = Path("data") / f"chrome_profile_{self.session_id}"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        opts.add_argument(f"--user-data-dir={profile_dir.resolve()}")
 
         self._driver = webdriver.Chrome(options=opts)
+        # Record the Chrome PID so we can kill it if the server is force-quit.
+        try:
+            _write_pid(self.session_id, self._driver.service.process.pid)
+        except Exception:
+            pass
         self._client = PokerClient(self._driver, cookie_path=self.cookie_path)
         # Open table directly. If not logged in, the user can complete login
         # in the visible window; subsequent polls will resume.
@@ -127,6 +170,7 @@ class _SessionScraper(threading.Thread):
                 self._driver.quit()
         except Exception:
             pass
+        _clear_pid(self.session_id)
 
     # -- polling -------------------------------------------------------------
 
@@ -328,6 +372,9 @@ class ScraperManager:
         self._watchdog = threading.Thread(target=self._watchdog_loop,
                                           name="scraper-watchdog", daemon=True)
         self._watchdog.start()
+
+    def kill_orphan_chromes(self) -> None:
+        kill_orphan_chromes()
 
     def _watchdog_loop(self) -> None:
         while True:
