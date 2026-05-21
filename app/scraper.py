@@ -65,7 +65,7 @@ class ScraperStatus:
 class _SessionScraper(threading.Thread):
     """Polls a PokerNow table and writes snapshots / hands to SQLite."""
 
-    POLL_SECONDS = 3.0
+    POLL_SECONDS = 1.0
 
     def __init__(self, session_id: int, url: str, cookie_path: str | None = None,
                  headless: bool = False) -> None:
@@ -83,6 +83,10 @@ class _SessionScraper(threading.Thread):
         self._last_stacks: dict[str, float] = {}
         # Peak pot value seen since the last hand was recorded.
         self._peak_pot: float = 0.0
+        # Fallback hand detection: track pot transition and pre-hand stack baseline.
+        # Winner banners only show ~3 s; each poll takes 6–15 s so they're often missed.
+        self._prev_pot_nonzero: bool = False
+        self._stacks_before_hand: dict[str, float] = {}
         # Auto-ledger state
         self._players_at_table: set[str] = set()   # who we saw last poll
         self._last_hand_winners: set[str] = set()  # names who won most recent hand (stack rise expected)
@@ -140,6 +144,13 @@ class _SessionScraper(threading.Thread):
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
         from PokerNow import PokerClient  # type: ignore
+        # Silence the PokerNow library's verbose print() debug output (it uses
+        # print() directly rather than the logging module, which floods Fly logs).
+        import PokerNow.managers as _pkr_mgr
+        import PokerNow.client as _pkr_cli
+        _noop = lambda *a, **kw: None  # noqa: E731
+        _pkr_mgr.print = _noop  # type: ignore[attr-defined]
+        _pkr_cli.print = _noop  # type: ignore[attr-defined]
 
         opts = Options()
         headless = self.headless or _must_run_headless()
@@ -270,6 +281,10 @@ class _SessionScraper(threading.Thread):
                     log.info("auto cashout (left table): %s %.0f", name, last)
         self._players_at_table = current_names
 
+        # Save current stacks as the pre-hand baseline whenever the pot is clear.
+        if pot_now == 0:
+            self._stacks_before_hand = dict(self._last_stacks)
+
         # 2. Track running peak pot for this hand.
         if pot_now > self._peak_pot:
             self._peak_pot = pot_now
@@ -277,6 +292,7 @@ class _SessionScraper(threading.Thread):
         # 3. Hand / winner detection — when winners change, log a new hand.
         winners = getattr(gs, "winners", None) or []
         signature = _winners_signature(winners)
+        _hand_recorded = False
         if signature and signature != self._last_winners_signature:
             self._last_winners_signature = signature
             self._last_hand_winners = {
@@ -284,6 +300,19 @@ class _SessionScraper(threading.Thread):
             }
             self._record_hand(gs, winners)
             self._peak_pot = 0.0  # reset for the next hand
+            _hand_recorded = True
+
+        # Fallback: pot just transitioned from >0 to 0 but we missed the winner banner.
+        # Use stack changes (pre-hand vs now) to infer the winner.
+        if not _hand_recorded and pot_now == 0 and self._prev_pot_nonzero and self._peak_pot > 0:
+            log.info(
+                "scraper: pot cleared without winner banner (session %s, peak_pot=%.0f) — stack fallback",
+                self.session_id, self._peak_pot,
+            )
+            self._record_hand_fallback(gs)
+            self._peak_pot = 0.0
+
+        self._prev_pot_nonzero = (pot_now > 0)
 
     def _record_hand(self, gs: Any, winners: list[dict[str, Any]]) -> None:
         community = getattr(gs, "community_cards", []) or []
@@ -335,6 +364,49 @@ class _SessionScraper(threading.Thread):
                     ),
                 )
         self.status.hands_recorded += 1
+
+    def _record_hand_fallback(self, gs: Any) -> None:
+        """Record a hand using stack changes when the winner banner was not polled.
+
+        PokerNow only shows winner banners for ~3 s; each get_game_state() call
+        takes 6–15 s, so most hands are missed by the normal detection path.
+        Instead, we compare current stacks against the pre-hand baseline
+        (_stacks_before_hand) to find who gained chips.
+        """
+        if not self._stacks_before_hand:
+            log.debug(
+                "scraper: fallback hand skipped — no pre-hand stack baseline (session %s)",
+                self.session_id,
+            )
+            return
+
+        fake_winners = []
+        for name, post in self._last_stacks.items():
+            pre = self._stacks_before_hand.get(name)
+            if pre is None:
+                continue
+            gain = post - pre
+            if gain > 0:
+                fake_winners.append({"name": name, "stack_info": f"{post:.0f} (+{gain:.0f})"})
+
+        if not fake_winners:
+            log.warning(
+                "scraper: fallback hand — no stack gains found for session %s "
+                "(pre=%s post=%s)",
+                self.session_id,
+                dict(self._stacks_before_hand),
+                dict(self._last_stacks),
+            )
+            return
+
+        log.info(
+            "scraper: fallback hand recorded — inferred winner(s): %s",
+            [w["name"] for w in fake_winners],
+        )
+        self._record_hand(gs, fake_winners)
+        # Reset signature so the next real winner banner is always detected
+        # (avoids missing a hand where the same player wins back-to-back).
+        self._last_winners_signature = ""
 
 
 def _coerce_number(value: Any) -> float | None:
