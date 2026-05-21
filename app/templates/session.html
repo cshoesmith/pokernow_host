@@ -2,23 +2,32 @@
 {% block title %}{{ session.name }}{% endblock %}
 {% block content %}
 <script>
-  // Auto-refresh every 5s, but pause whenever a form field is focused so we
-  // don't wipe out half-typed buy-in entries.
-  (function () {
-    let timer = null;
-    function schedule() {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => {
-        if (document.activeElement &&
-            ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
-          schedule();
-          return;
+  // Auto-refresh every 5 s without a full-page flash: fetch the current URL
+  // and swap only <main> innerHTML so forms / scroll position are preserved.
+  // Guard prevents double-init if this script tag ever gets re-injected.
+  if (!window.__sessionPoll) {
+    window.__sessionPoll = true;
+    (function poll() {
+      setTimeout(function () {
+        const tag = document.activeElement && document.activeElement.tagName;
+        if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') {
+          return poll(); // user is typing — skip this cycle
         }
-        location.reload();
+        fetch(location.href)
+          .then(function (r) { return r.text(); })
+          .then(function (html) {
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const nm = doc.querySelector('main');
+            if (nm) {
+              document.querySelector('main').innerHTML = nm.innerHTML;
+              if (typeof window._ltInit === 'function') window._ltInit();
+            }
+          })
+          .catch(function () {})
+          .finally(poll);
       }, 5000);
-    }
-    document.addEventListener('DOMContentLoaded', schedule);
-  })();
+    })();
+  }
 </script>
 <section>
   <div style="display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap;">

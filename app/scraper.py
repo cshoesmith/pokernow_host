@@ -281,8 +281,12 @@ class _SessionScraper(threading.Thread):
                     log.info("auto cashout (left table): %s %.0f", name, last)
         self._players_at_table = current_names
 
-        # Save current stacks as the pre-hand baseline whenever the pot is clear.
-        if pot_now == 0:
+        # Save stacks as the pre-hand baseline only when genuinely idle between
+        # hands (pot has been 0 for at least two consecutive polls).  We must
+        # NOT overwrite the baseline on the same poll where the fallback runs
+        # (pot just cleared), otherwise both sides of the delta would be
+        # identical and no winner could be inferred.
+        if pot_now == 0 and not self._prev_pot_nonzero:
             self._stacks_before_hand = dict(self._last_stacks)
 
         # 2. Track running peak pot for this hand.

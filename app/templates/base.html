@@ -97,10 +97,9 @@
     {% block content %}{% endblock %}
   </main>
   <script>
-    // Convert UTC ISO timestamps emitted by the `localtime` Jinja filter, plus
-    // any bare ISO strings inside <td>/<span> elements that look like dates,
-    // into the browser's local timezone.
-    (function () {
+    // Convert UTC ISO timestamps into the browser's local timezone.
+    // Exposed as window._ltInit so pages that do partial DOM swaps can re-run it.
+    window._ltInit = (function () {
       const fmt = new Intl.DateTimeFormat(undefined, {
         year: 'numeric', month: 'short', day: '2-digit',
         hour: '2-digit', minute: '2-digit', hour12: false,
@@ -122,21 +121,21 @@
         el.title = raw + ' (UTC)';
       }
 
-      // Tagged elements emitted by the `localtime` filter
-      document.querySelectorAll('time.lt[datetime]').forEach(el => {
-        localize(el, el.getAttribute('datetime'));
-      });
-
-      // Catch-all: bare ISO strings inside table cells (legacy templates).
-      document.querySelectorAll('td, span').forEach(el => {
-        if (el.children.length || el.dataset.ltDone) return;
-        const t = el.textContent;
-        if (ISO_RE.test(t)) {
-          el.dataset.ltDone = '1';
-          localize(el, t.trim());
-        }
-      });
+      return function () {
+        document.querySelectorAll('time.lt[datetime]').forEach(el => {
+          localize(el, el.getAttribute('datetime'));
+        });
+        document.querySelectorAll('td, span').forEach(el => {
+          if (el.children.length || el.dataset.ltDone) return;
+          const t = el.textContent;
+          if (ISO_RE.test(t)) {
+            el.dataset.ltDone = '1';
+            localize(el, t.trim());
+          }
+        });
+      };
     })();
+    window._ltInit();
   </script>
 </body>
 </html>
