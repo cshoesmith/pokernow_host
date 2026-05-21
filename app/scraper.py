@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import signal
 import threading
 import time
@@ -19,7 +20,7 @@ from . import db
 
 log = logging.getLogger("scraper")
 
-PID_DIR = Path("data/chrome_pids")
+PID_DIR = db.DATA_DIR / "chrome_pids"
 
 
 def _write_pid(session_id: int, pid: int) -> None:
@@ -74,7 +75,8 @@ class _SessionScraper(threading.Thread):
         self.cookie_path = cookie_path or f"data/cookies_session_{session_id}.pkl"
         self.headless = headless
         self.status = ScraperStatus()
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
+        self._thread_done = threading.Event()  # set when run() exits; avoids join() which breaks in Python 3.11.12+
         self._driver = None
         self._client = None
         self._last_winners_signature: str | None = None
@@ -88,7 +90,7 @@ class _SessionScraper(threading.Thread):
     # -- lifecycle -----------------------------------------------------------
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     # Exceptions that indicate the Chrome session is dead and needs full reinit.
     _FATAL_EXC = ("InvalidSessionIdException", "WebDriverException",
@@ -105,7 +107,7 @@ class _SessionScraper(threading.Thread):
 
         self.status.running = True
         try:
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 try:
                     self._poll_once()
                     self.status.last_error = None
@@ -116,8 +118,8 @@ class _SessionScraper(threading.Thread):
                     if type(exc).__name__ in self._FATAL_EXC:
                         log.warning("fatal driver error — reinitialising Chrome for session %s", self.session_id)
                         self._teardown_driver()
-                        self._stop.wait(5)
-                        if self._stop.is_set():
+                        self._stop_event.wait(5)
+                        if self._stop_event.is_set():
                             break
                         try:
                             self._init_driver()
@@ -126,10 +128,11 @@ class _SessionScraper(threading.Thread):
                             self.status.last_error = f"reinit failed: {init_exc}"
                             log.exception("reinit failed for session %s", self.session_id)
                             break  # give up; watchdog will restart the thread
-                self._stop.wait(self.POLL_SECONDS)
+                self._stop_event.wait(self.POLL_SECONDS)
         finally:
             self.status.running = False
             self._teardown_driver()
+            self._thread_done.set()
 
     # -- selenium setup ------------------------------------------------------
 
@@ -139,13 +142,28 @@ class _SessionScraper(threading.Thread):
         from PokerNow import PokerClient  # type: ignore
 
         opts = Options()
-        if self.headless:
+        headless = self.headless or _must_run_headless()
+        if headless:
             opts.add_argument("--headless=new")
         opts.add_argument("--window-size=1280,900")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--no-first-run")
+        opts.add_argument("--no-default-browser-check")
+        opts.add_argument("--disable-extensions")
+        opts.add_argument("--remote-debugging-port=0")
         # Use a session-specific profile dir so each scraper gets its own Chrome instance.
-        profile_dir = Path("data") / f"chrome_profile_{self.session_id}"
+        profile_dir = db.DATA_DIR / f"chrome_profile_{self.session_id}"
         profile_dir.mkdir(parents=True, exist_ok=True)
+        _clear_stale_chrome_profile_locks(profile_dir)
         opts.add_argument(f"--user-data-dir={profile_dir.resolve()}")
+        log.info(
+            "starting Chrome for session %s (headless=%s, profile=%s)",
+            self.session_id,
+            headless,
+            profile_dir,
+        )
 
         self._driver = webdriver.Chrome(options=opts)
         # Record the Chrome PID so we can kill it if the server is force-quit.
@@ -358,6 +376,27 @@ def _parse_winner_prize(stack_info: Any) -> float | None:
     return None
 
 
+def _must_run_headless() -> bool:
+    """Return True when Chrome cannot open a visible window in this runtime."""
+    if os.environ.get("VNBT_POKER_FORCE_HEADLESS", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    # Fly/Docker Linux containers generally have no X/Wayland display. Trying
+    # non-headless Chrome there fails with "session not created: Chrome instance
+    # exited" before Selenium can attach to DevTools.
+    if platform.system() == "Linux" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return True
+    return False
+
+
+def _clear_stale_chrome_profile_locks(profile_dir: Path) -> None:
+    """Remove lock files left by a crashed Chrome using this profile directory."""
+    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
+        try:
+            (profile_dir / name).unlink(missing_ok=True)
+        except Exception as exc:
+            log.debug("could not clear stale Chrome profile file %s: %s", profile_dir / name, exc)
+
+
 # ---------------------------------------------------------------------------
 # Manager (singleton)
 # ---------------------------------------------------------------------------
@@ -386,7 +425,7 @@ class ScraperManager:
                 ]
             for sid, w in dead:
                 log.warning("watchdog: scraper for session %s died — restarting", sid)
-                new_worker = _SessionScraper(sid, w.url, headless=w.headless)
+                new_worker = _SessionScraper(sid, w.url, cookie_path=w.cookie_path, headless=w.headless)
                 with self._lock:
                     self._workers[sid] = new_worker
                 new_worker.start()
@@ -408,7 +447,7 @@ class ScraperManager:
             worker = self._workers.get(session_id)
         if worker:
             worker.stop()
-            worker.join(timeout=10)
+            worker._thread_done.wait(timeout=10)
 
     def status(self, session_id: int) -> ScraperStatus | None:
         worker = self._workers.get(session_id)
@@ -420,7 +459,7 @@ class ScraperManager:
         for w in workers:
             w.stop()
         for w in workers:
-            w.join(timeout=10)
+            w._thread_done.wait(timeout=10)
 
 
 manager = ScraperManager()
