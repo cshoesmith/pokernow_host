@@ -21,6 +21,7 @@
             if (nm) {
               document.querySelector('main').innerHTML = nm.innerHTML;
               if (typeof window._ltInit === 'function') window._ltInit();
+              if (typeof window._plChartInit === 'function') window._plChartInit();
             }
           })
           .catch(function () {})
@@ -158,11 +159,15 @@
   </div>
   <script id="pl-data" type="application/json">{{ pl_timeline | tojson }}</script>
   <script>
-    (function () {
-      const data = JSON.parse(document.getElementById('pl-data').textContent);
-      if (!data || !data.length) return;
+    // Exposed as a global so the poll-swap loop can re-init the chart after each innerHTML replace
+    // (browsers don't re-execute <script> tags injected via innerHTML).
+    window._plChartInit = function () {
+      const dataEl = document.getElementById('pl-data');
       const wrap = document.getElementById('pl-chart');
       const legend = document.getElementById('pl-legend');
+      if (!dataEl || !wrap || !legend) return;
+      const data = JSON.parse(dataEl.textContent);
+      if (!data || !data.length) return;
       const palette = ['#3ea676','#7fb3ff','#d97757','#c084fc','#facc15','#34d399','#f472b6','#60a5fa','#fb923c','#a3e635'];
       let focused = null;
 
@@ -292,9 +297,14 @@
           });
         });
       }
-      render();
+      // Replace any previous resize listener so we don't stack them on every poll swap
+      if (window._plChartResize) window.removeEventListener('resize', window._plChartResize);
+      window._plChartResize = render;
       window.addEventListener('resize', render);
-    })();
+
+      render();
+    };
+    window._plChartInit();
   </script>
   {% endif %}
 </section>
