@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import time as _time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -33,6 +34,21 @@ def _localtime_filter(value):
 
 
 templates.env.filters["localtime"] = _localtime_filter
+
+
+# ---------------------------------------------------------------------------
+# Server-side page-data cache
+# Multiple viewers polling every 5 s would each trigger the same heavy DB
+# queries.  Cache the expensive per-session context for a short TTL so they
+# all share one DB roundtrip.  session / scraper / current_user are always
+# fetched fresh (they're cheap or per-user).
+# ---------------------------------------------------------------------------
+_SESSION_CTX_CACHE: dict[int, tuple[float, dict]] = {}
+_SESSION_CTX_TTL = 4.0  # seconds
+
+
+def _invalidate_session_cache(session_id: int) -> None:
+    _SESSION_CTX_CACHE.pop(session_id, None)
 
 
 def _cards_filter(board: str) -> list[dict]:
@@ -149,56 +165,62 @@ def index(request: Request, current_user: dict = Depends(get_current_user)):
 @app.get("/sessions/{session_id}")
 def session_view(session_id: int, request: Request, current_user: dict = Depends(get_current_user)):
     session = _get_session_or_404(session_id, current_user["group_id"])
-    players = db.session_player_summary(session_id)
-    ledger = db.query(
-        """
-        SELECT le.*, p.name AS player_name
-        FROM ledger_entries le
-        JOIN players p ON p.id = le.player_id
-        WHERE le.session_id = ?
-        ORDER BY le.created_at DESC
-        """,
-        (session_id,),
-    )
-    hands = db.query(
-        "SELECT * FROM hands WHERE session_id = ? ORDER BY hand_number DESC LIMIT 25",
-        (session_id,),
-    )
-    hand_ids = [h["id"] for h in hands]
-    winners_by_hand: dict[int, list[dict]] = {hid: [] for hid in hand_ids}
-    if hand_ids:
-        placeholders = ",".join("?" * len(hand_ids))
-        rows = db.query(
-            f"SELECT * FROM hand_winners WHERE hand_id IN ({placeholders})", hand_ids
-        )
-        for r in rows:
-            winners_by_hand[r["hand_id"]].append(dict(r))
 
-    scraper_status = scraper_manager.status(session_id)
-    totals = {
-        "bought_in": sum(float(p["bought_in"]) for p in players),
-        "cashed_out": sum(float(p["cashed_out"]) for p in players),
-        "live_stacks": sum(float(p["current_stack"] or 0) for p in players),
-    }
-    podium = db.session_hand_wins(session_id)[:3]
-    big_hand = db.biggest_hand(session_id)
-    most_buyins = db.session_most_buyins(session_id)[:3]
-    return templates.TemplateResponse(
-        request,
-        "session.html",
-        {
-            "session": session,
+    cached = _SESSION_CTX_CACHE.get(session_id)
+    if cached and (_time.monotonic() - cached[0]) < _SESSION_CTX_TTL:
+        ctx = cached[1]
+    else:
+        players = db.session_player_summary(session_id)
+        ledger = db.query(
+            """
+            SELECT le.*, p.name AS player_name
+            FROM ledger_entries le
+            JOIN players p ON p.id = le.player_id
+            WHERE le.session_id = ?
+            ORDER BY le.created_at DESC
+            """,
+            (session_id,),
+        )
+        hands = db.query(
+            "SELECT * FROM hands WHERE session_id = ? ORDER BY hand_number DESC LIMIT 25",
+            (session_id,),
+        )
+        hand_ids = [h["id"] for h in hands]
+        winners_by_hand: dict[int, list[dict]] = {hid: [] for hid in hand_ids}
+        if hand_ids:
+            placeholders = ",".join("?" * len(hand_ids))
+            rows = db.query(
+                f"SELECT * FROM hand_winners WHERE hand_id IN ({placeholders})", hand_ids
+            )
+            for r in rows:
+                winners_by_hand[r["hand_id"]].append(dict(r))
+
+        totals = {
+            "bought_in": sum(float(p["bought_in"]) for p in players),
+            "cashed_out": sum(float(p["cashed_out"]) for p in players),
+            "live_stacks": sum(float(p["current_stack"] or 0) for p in players),
+        }
+        ctx = {
             "players": players,
             "ledger": ledger,
             "hands": hands,
             "winners_by_hand": winners_by_hand,
-            "scraper": scraper_status,
             "totals": totals,
-            "podium": podium,
-            "big_hand": big_hand,
-            "most_buyins": most_buyins,
+            "podium": db.session_hand_wins(session_id)[:3],
+            "big_hand": db.biggest_hand(session_id),
+            "most_buyins": db.session_most_buyins(session_id)[:3],
             "pl_timeline": db.session_pl_timeline(session_id),
-            "current_user": current_user,
+        }
+        _SESSION_CTX_CACHE[session_id] = (_time.monotonic(), ctx)
+
+    return templates.TemplateResponse(
+        request,
+        "session.html",
+        {
+            **ctx,
+            "session": session,                              # always fresh (auth + status)
+            "scraper": scraper_manager.status(session_id),  # always fresh (in-memory)
+            "current_user": current_user,                   # per-user
         },
     )
 
@@ -284,6 +306,7 @@ def close_session(session_id: int, current_user: dict = Depends(get_current_user
         (db.now_iso(), session_id),
     )
     scraper_manager.stop(session_id)
+    _invalidate_session_cache(session_id)
     return RedirectResponse(f"/sessions/{session_id}", status_code=303)
 
 
@@ -295,6 +318,7 @@ def reopen_session(session_id: int, current_user: dict = Depends(get_current_use
         "UPDATE sessions SET status='open', ended_at=NULL WHERE id=?",
         (session_id,),
     )
+    _invalidate_session_cache(session_id)
     return RedirectResponse(f"/sessions/{session_id}", status_code=303)
 
 
@@ -326,6 +350,7 @@ def add_player(session_id: int, name: str = Form(...), seat_name: str = Form("")
     _get_session_or_404(session_id, current_user["group_id"])
     pid = db.get_or_create_player(name)
     db.add_session_player(session_id, pid, seat_name.strip() or name.strip())
+    _invalidate_session_cache(session_id)
     return RedirectResponse(f"/sessions/{session_id}", status_code=303)
 
 
@@ -347,6 +372,7 @@ def add_ledger(
         "VALUES (?, ?, ?, ?, ?, ?)",
         (session_id, player_id, kind, float(amount), note.strip() or None, db.now_iso()),
     )
+    _invalidate_session_cache(session_id)
     return RedirectResponse(f"/sessions/{session_id}", status_code=303)
 
 
@@ -359,6 +385,7 @@ def delete_ledger(session_id: int, entry_id: int,
         "DELETE FROM ledger_entries WHERE id=? AND session_id=?",
         (entry_id, session_id),
     )
+    _invalidate_session_cache(session_id)
     return RedirectResponse(f"/sessions/{session_id}", status_code=303)
 
 
@@ -376,6 +403,7 @@ def start_scraper(session_id: int, url: str = Form(""), headless: str = Form("")
             (table_url, session_id),
         )
     scraper_manager.start(session_id, table_url, headless=bool(headless))
+    _invalidate_session_cache(session_id)
     return RedirectResponse(f"/sessions/{session_id}", status_code=303)
 
 

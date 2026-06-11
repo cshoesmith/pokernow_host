@@ -39,6 +39,7 @@
   {% endif %}
 
   {% if current_user.role == 'manager' %}
+  <form class="inline" method="post" action="/sessions/{{ session.id }}/scraper/start">
     <input name="url" value="{{ session.pokernow_url or '' }}"
            placeholder="https://www.pokernow.club/games/... or game ID" style="flex:1; min-width:320px;">
     <label class="muted"><input type="checkbox" name="headless" value="1"> headless</label>
