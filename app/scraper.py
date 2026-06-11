@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import re
 import signal
 import threading
 import time
@@ -19,6 +20,15 @@ from typing import Any
 from . import db
 
 log = logging.getLogger("scraper")
+
+# Matches PokerNow game-log "collected" lines, e.g.:
+#   "Shoey collected 1500 from pot"
+#   "Alice collected 300 from main pot"
+#   "Bob collected 200 from side pot-1"
+_COLLECTED_RE = re.compile(
+    r'^(.+?)\s+collected\s+([\d,]+(?:\.\d+)?)\s+from\b',
+    re.IGNORECASE,
+)
 
 PID_DIR = db.DATA_DIR / "chrome_pids"
 
@@ -90,6 +100,9 @@ class _SessionScraper(threading.Thread):
         # Auto-ledger state
         self._players_at_table: set[str] = set()   # who we saw last poll
         self._last_hand_winners: set[str] = set()  # names who won most recent hand (stack rise expected)
+        # Game-log scraping state (primary hand detection path)
+        self._log_watermark: int = -1   # -1 = not yet initialised; >=0 = entries already processed
+        self._last_board: str | None = None  # community cards cached from last poll
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -289,34 +302,153 @@ class _SessionScraper(threading.Thread):
         if pot_now == 0 and not self._prev_pot_nonzero:
             self._stacks_before_hand = dict(self._last_stacks)
 
+        # Cache community cards whenever visible (used by log-path recording
+        # when the board may have cleared by the time we read the log).
+        community_now = getattr(gs, "community_cards", []) or []
+        if community_now:
+            self._last_board = " ".join(str(c) for c in community_now)
+
         # 2. Track running peak pot for this hand.
         if pot_now > self._peak_pot:
             self._peak_pot = pot_now
 
-        # 3. Hand / winner detection — when winners change, log a new hand.
-        winners = getattr(gs, "winners", None) or []
-        signature = _winners_signature(winners)
-        _hand_recorded = False
-        if signature and signature != self._last_winners_signature:
-            self._last_winners_signature = signature
-            self._last_hand_winners = {
-                str(w.get("name", "")).strip() for w in winners if w.get("name")
-            }
-            self._record_hand(gs, winners)
-            self._peak_pot = 0.0  # reset for the next hand
-            _hand_recorded = True
+        # 3. Hand / winner detection.
+        # Primary: game log — persistent, never disappears after ~3 s like the banner.
+        _hand_recorded = self._poll_log(gs)
 
-        # Fallback: pot just transitioned from >0 to 0 but we missed the winner banner.
-        # Use stack changes (pre-hand vs now) to infer the winner.
+        # Secondary: winner banner (fast path when log is unavailable).
+        if not _hand_recorded:
+            winners = getattr(gs, "winners", None) or []
+            signature = _winners_signature(winners)
+            if signature and signature != self._last_winners_signature:
+                self._last_winners_signature = signature
+                self._last_hand_winners = {
+                    str(w.get("name", "")).strip() for w in winners if w.get("name")
+                }
+                self._record_hand(gs, winners)
+                self._peak_pot = 0.0
+                _hand_recorded = True
+
+        # Tertiary: stack-delta fallback when both log and banner missed the hand.
         if not _hand_recorded and pot_now == 0 and self._prev_pot_nonzero and self._peak_pot > 0:
             log.info(
-                "scraper: pot cleared without winner banner (session %s, peak_pot=%.0f) — stack fallback",
+                "scraper: pot cleared without log/banner (session %s, peak_pot=%.0f) — stack fallback",
                 self.session_id, self._peak_pot,
             )
             self._record_hand_fallback(gs)
             self._peak_pot = 0.0
 
         self._prev_pot_nonzero = (pot_now > 0)
+
+    # -- game-log scraping (primary hand detection) --------------------------
+
+    def _read_log_entries(self) -> list[str]:
+        """Return text of all game-log entries via a single JS call."""
+        try:
+            result = self._driver.execute_script(
+                "return Array.from(document.querySelectorAll('.log-modal-entries p.content'))"
+                ".map(p => p.innerText.trim()).filter(t => t.length > 0);"
+            )
+            return result or []
+        except Exception:
+            return []
+
+    def _poll_log(self, gs: Any) -> bool:
+        """Read new game-log entries and record completed hands found there.
+
+        Returns True if at least one hand was recorded.  This is the primary
+        detection path — the persistent log never disappears (unlike the ~3 s
+        winner banner), so it catches every hand regardless of poll latency.
+        """
+        entries = self._read_log_entries()
+        if not entries:
+            return False
+
+        if self._log_watermark < 0:
+            # First time entries are visible — skip history, only process future entries.
+            self._log_watermark = len(entries)
+            log.info("scraper: log watermark initialised at %d entries (session %s)",
+                     len(entries), self.session_id)
+            return False
+
+        if len(entries) <= self._log_watermark:
+            return False  # nothing new (or log hidden/reset)
+
+        new_entries = entries[self._log_watermark:]
+        self._log_watermark = len(entries)
+
+        recorded = False
+        pending: list[dict] = []
+
+        def flush() -> None:
+            nonlocal recorded
+            if not pending:
+                return
+            winners = list(pending)
+            pending.clear()
+            sig = _winners_signature(winners)
+            if sig == self._last_winners_signature:
+                log.debug("scraper: log hand skipped (already recorded via banner): %s", sig)
+                return
+            self._last_winners_signature = sig
+            self._last_hand_winners = {w["name"] for w in winners}
+            # Use cached board if gs community cards are already cleared
+            community = getattr(gs, "community_cards", []) or []
+            board = self._last_board if not community else None
+            self._record_hand_from_log(winners, community or board)
+            self._peak_pot = 0.0
+            recorded = True
+
+        for entry in new_entries:
+            log.debug("scraper log: %s", entry)
+            m = _COLLECTED_RE.match(entry)
+            if m:
+                name = m.group(1).strip()
+                amount = float(m.group(2).replace(",", ""))
+                pending.append({"name": name, "stack_info": f"(+{amount:.0f})"})
+            else:
+                flush()  # non-collected entry = boundary between hands
+        flush()
+        return recorded
+
+    def _record_hand_from_log(self, winners: list[dict[str, Any]], community: Any) -> None:
+        """Persist a hand detected via the game log."""
+        if isinstance(community, list):
+            board = " ".join(str(c) for c in community) if community else None
+        else:
+            board = community or None  # already a string or None
+
+        # Pot = sum of collected amounts (more reliable than _peak_pot here)
+        total = sum(
+            float(w["stack_info"].lstrip("(+").rstrip(")"))
+            for w in winners
+            if w.get("stack_info") and "(+" in w["stack_info"]
+        )
+        pot = total if total > 0 else (self._peak_pot or None)
+
+        with db.connect() as cx:
+            row = cx.execute(
+                "SELECT COALESCE(MAX(hand_number), 0) AS m FROM hands WHERE session_id = ?",
+                (self.session_id,),
+            ).fetchone()
+            next_no = int(row["m"]) + 1
+            cur = cx.execute(
+                "INSERT INTO hands (session_id, hand_number, pot_size, board, started_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (self.session_id, next_no, pot, board, db.now_iso()),
+            )
+            hand_id = cur.lastrowid
+            for w in winners:
+                cx.execute(
+                    "INSERT INTO hand_winners (hand_id, player_name, amount_won, winner_cards, winner_hand_desc) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (hand_id, w["name"], _parse_winner_prize(w.get("stack_info")), None, None),
+                )
+        self.status.hands_recorded += 1
+        log.info(
+            "scraper: hand #%d recorded via log — winner(s): %s, pot: %s (session %s)",
+            next_no, [w["name"] for w in winners], pot, self.session_id,
+        )
 
     def _record_hand(self, gs: Any, winners: list[dict[str, Any]]) -> None:
         community = getattr(gs, "community_cards", []) or []
